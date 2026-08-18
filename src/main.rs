@@ -13,6 +13,9 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "loa",
         eframe::NativeOptions::default(),
-        Box::new(|_cc| Ok(Box::new(LoaApp::new(conn)))),
+        Box::new(|cc| {
+            ui::theme::apply(&cc.egui_ctx);
+            Ok(Box::new(LoaApp::new(conn)))
+        }),
     )
 }

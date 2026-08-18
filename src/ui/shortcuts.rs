@@ -20,10 +20,12 @@ pub fn handle(ctx: &egui::Context, state: &mut AppState) {
 }
 
 /// While the sidebar has keyboard control (entered via `handle_focus_sidebar`
-/// below, or by clicking a row), Up/Down step through perspectives —
-/// switching live, like a persistent preview pane — and Tab hands keyboard
-/// control to the current perspective's content instead of cycling to the
-/// next sidebar row (egui's default Tab behavior).
+/// below, or by clicking a row), Up/Down step through perspectives, switching
+/// live. Each step also places the keyboard inside that perspective's content
+/// immediately (`AppState::focus_sidebar`/`move_sidebar_highlight` highlight
+/// its first task) — Space/Enter/M/D/flag/delete all act on it right away, no
+/// extra step required. Tab still hands Up/Down themselves over to the
+/// content list, to move past that first item.
 fn handle_sidebar_navigation(ctx: &egui::Context, state: &mut AppState) {
     if !state.sidebar_focused {
         return;
@@ -93,7 +95,7 @@ fn handle_quick_capture(ctx: &egui::Context, state: &mut AppState) {
         return;
     }
 
-    if state.sidebar_focused || state.project_picker.is_some() || state.due_date_picker.is_some() {
+    if state.project_picker.is_some() || state.due_date_picker.is_some() {
         return;
     }
     let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::N);
@@ -111,7 +113,7 @@ fn handle_flag_toggle(ctx: &egui::Context, state: &mut AppState) {
     if !ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
         return;
     }
-    if state.any_picker_open() || state.sidebar_focused {
+    if state.any_picker_open() {
         return;
     }
     if let Some(id) = state.highlighted_task
@@ -126,7 +128,7 @@ fn handle_delete(ctx: &egui::Context, state: &mut AppState) {
     if !ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
         return;
     }
-    if state.any_picker_open() || state.sidebar_focused {
+    if state.any_picker_open() {
         return;
     }
     if let Some(id) = state.highlighted_task {
@@ -158,7 +160,7 @@ fn handle_task_navigation(ctx: &egui::Context, state: &mut AppState) {
 /// if it's already showing that same task. Guarded like Space, below, so it
 /// doesn't hijack Enter from text fields (quick capture, tag input, ...).
 fn handle_toggle_details(ctx: &egui::Context, state: &mut AppState) {
-    if state.any_picker_open() || state.sidebar_focused {
+    if state.any_picker_open() {
         return;
     }
     if ctx.memory(|m| m.focused()).is_some() {
@@ -189,7 +191,7 @@ fn handle_project_picker(ctx: &egui::Context, state: &mut AppState) {
         return;
     }
 
-    if state.any_picker_open() || state.sidebar_focused || ctx.memory(|m| m.focused()).is_some() {
+    if state.any_picker_open() || ctx.memory(|m| m.focused()).is_some() {
         return;
     }
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::M))
@@ -219,7 +221,7 @@ fn handle_due_date_picker(ctx: &egui::Context, state: &mut AppState) {
         return;
     }
 
-    if state.any_picker_open() || state.sidebar_focused || ctx.memory(|m| m.focused()).is_some() {
+    if state.any_picker_open() || ctx.memory(|m| m.focused()).is_some() {
         return;
     }
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::D))
@@ -230,7 +232,7 @@ fn handle_due_date_picker(ctx: &egui::Context, state: &mut AppState) {
 }
 
 fn handle_complete_toggle(ctx: &egui::Context, state: &mut AppState) {
-    if state.any_picker_open() || state.sidebar_focused {
+    if state.any_picker_open() {
         return;
     }
     // Unlike the shortcuts above, Space has no modifier, so it would eat spaces

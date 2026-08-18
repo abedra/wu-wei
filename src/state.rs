@@ -195,6 +195,12 @@ pub struct AppState {
     /// [`AppState::focus_sidebar`]): Up/Down step through perspectives instead
     /// of the task list, and other task shortcuts (Space, M, D, ...) stand down.
     pub sidebar_focused: bool,
+    /// Whether the right-hand detail panel is currently shown. Automatically
+    /// opens on a new selection and closes when the selection is cleared
+    /// (mirrors OmniFocus: the inspector only makes sense with something to
+    /// inspect), but can also be toggled directly regardless of selection
+    /// (the info button — see `AppState::toggle_detail_panel`).
+    pub detail_panel_open: bool,
     pub error_message: Option<String>,
 }
 
@@ -218,6 +224,7 @@ impl AppState {
             project_picker: None,
             due_date_picker: None,
             sidebar_focused: false,
+            detail_panel_open: false,
             error_message: None,
         };
         state.refresh_projects();
@@ -228,13 +235,26 @@ impl AppState {
 
     pub fn set_perspective(&mut self, p: Perspective) {
         self.perspective = p;
-        self.selection = Selection::None;
+        self.clear_selection();
         self.highlighted_task = None;
+        self.sidebar_focused = false;
+        self.refresh_visible_tasks();
+    }
+
+    /// Clears whatever is selected and its edit buffer, closing the detail
+    /// panel along with it (see `AppState::detail_panel_open`).
+    fn clear_selection(&mut self) {
+        self.selection = Selection::None;
         self.task_edit_buffer = None;
         self.project_edit_buffer = None;
         self.tag_edit_buffer = None;
-        self.sidebar_focused = false;
-        self.refresh_visible_tasks();
+        self.detail_panel_open = false;
+    }
+
+    /// The info-button toggle: shows or hides the detail panel regardless of
+    /// whether anything is currently selected.
+    pub fn toggle_detail_panel(&mut self) {
+        self.detail_panel_open = !self.detail_panel_open;
     }
 
     /// Every sidebar row's perspective, in the exact order `ui::sidebar::draw`
@@ -263,6 +283,12 @@ impl AppState {
         };
         self.set_perspective(perspective);
         self.sidebar_focused = true;
+        // Navigating to a sidebar item immediately places the keyboard inside
+        // that item's content (its first task, if it shows one) — task
+        // shortcuts (Space, Enter, M, D, ...) work right away, with no extra
+        // step to "enter" the content. Up/Down still browse the sidebar itself
+        // until Tab hands them over to the list (see `exit_sidebar_focus`).
+        self.move_highlight(0);
     }
 
     /// Moves the current perspective by `delta` rows within the sidebar's
@@ -280,18 +306,14 @@ impl AppState {
         let next = (current as i32 + delta).clamp(0, entries.len() as i32 - 1) as usize;
         self.set_perspective(entries[next]);
         self.sidebar_focused = true;
+        self.move_highlight(0);
     }
 
-    /// Leaves sidebar keyboard-navigation mode and hands keyboard control to
-    /// the current perspective's content (the first task, if it shows one).
+    /// Leaves sidebar keyboard-navigation mode, handing Up/Down over to the
+    /// content list itself (rather than just its already-highlighted first
+    /// item — see `focus_sidebar`).
     pub fn exit_sidebar_focus(&mut self) {
         self.sidebar_focused = false;
-        if !matches!(
-            self.perspective,
-            Perspective::AllProjects | Perspective::AllTags
-        ) {
-            self.move_highlight(0);
-        }
     }
 
     pub fn refresh_visible_tasks(&mut self) {
@@ -363,6 +385,7 @@ impl AppState {
             .iter()
             .find(|t| t.id == id)
             .map(|t| TaskEditBuffer::from_task(t, &self.tags));
+        self.detail_panel_open = true;
     }
 
     pub fn select_project(&mut self, id: ProjectId) {
@@ -374,6 +397,7 @@ impl AppState {
             .iter()
             .find(|p| p.id == id)
             .map(ProjectEditBuffer::from_project);
+        self.detail_panel_open = true;
     }
 
     pub fn select_tag(&mut self, id: TagId) {
@@ -385,6 +409,7 @@ impl AppState {
             .iter()
             .find(|t| t.id == id)
             .map(TagEditBuffer::from_tag);
+        self.detail_panel_open = true;
     }
 
     /// Moves the keyboard cursor by `delta` rows within `visible_tasks` (negative
@@ -413,8 +438,7 @@ impl AppState {
             return;
         };
         if self.selection == Selection::Task(id) {
-            self.selection = Selection::None;
-            self.task_edit_buffer = None;
+            self.clear_selection();
         } else {
             self.select_task(id);
         }
@@ -592,8 +616,7 @@ impl AppState {
             return;
         }
         if self.selection == Selection::Task(id) {
-            self.selection = Selection::None;
-            self.task_edit_buffer = None;
+            self.clear_selection();
         }
         self.refresh_visible_tasks();
     }
@@ -610,8 +633,7 @@ impl AppState {
             self.set_perspective(Perspective::Inbox);
         } else {
             if self.selection == Selection::Project(id) {
-                self.selection = Selection::None;
-                self.project_edit_buffer = None;
+                self.clear_selection();
             }
             // Tasks that belonged to this project moved to the Inbox (ON DELETE SET NULL),
             // which can change the current perspective's contents (e.g. viewing Inbox).
@@ -631,8 +653,7 @@ impl AppState {
             self.set_perspective(Perspective::Inbox);
         } else {
             if self.selection == Selection::Tag(id) {
-                self.selection = Selection::None;
-                self.tag_edit_buffer = None;
+                self.clear_selection();
             }
             self.refresh_visible_tasks();
         }
@@ -1061,7 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn exit_sidebar_focus_hands_off_to_first_task() {
+    fn focusing_a_sidebar_row_immediately_highlights_its_first_task() {
         let mut state = AppState::new(crate::db::open_in_memory().unwrap());
         state.quick_entry_buffer = "water plants".to_string();
         state.quick_capture_submit();
@@ -1069,24 +1090,104 @@ mod tests {
 
         state.focus_sidebar(0); // Inbox
         assert!(state.sidebar_focused);
-
-        state.exit_sidebar_focus();
-        assert!(!state.sidebar_focused);
+        // Navigating to the row places the keyboard inside its content right
+        // away, with no separate step required to "enter" the list.
         assert_eq!(state.highlighted_task, Some(task_id));
-        // Exiting to content never opens the detail panel by itself.
+        // But it doesn't go as far as opening the detail panel.
         assert_eq!(state.selection, Selection::None);
     }
 
     #[test]
-    fn focusing_sidebar_clears_the_task_list_cursor() {
+    fn moving_the_sidebar_highlight_keeps_the_first_task_synced() {
         let mut state = AppState::new(crate::db::open_in_memory().unwrap());
         state.quick_entry_buffer = "water plants".to_string();
         state.quick_capture_submit();
-        state.move_highlight(1);
-        assert!(state.highlighted_task.is_some());
+        let inbox_task = state.visible_tasks[0].id;
 
-        state.focus_sidebar(0);
-        assert!(state.sidebar_focused);
+        state.quick_entry_buffer = "renew passport".to_string();
+        state.quick_capture_submit();
+        state.toggle_flag(state.visible_tasks[1].id, true);
+        let flagged_task = state.visible_tasks[1].id;
+
+        state.focus_sidebar(0); // Inbox
+        assert_eq!(state.highlighted_task, Some(inbox_task));
+
+        state.move_sidebar_highlight(1); // Today (empty)
         assert!(state.highlighted_task.is_none());
+
+        state.move_sidebar_highlight(1); // Flagged
+        assert_eq!(state.perspective, Perspective::Flagged);
+        assert_eq!(state.highlighted_task, Some(flagged_task));
+    }
+
+    #[test]
+    fn exit_sidebar_focus_only_releases_arrow_keys() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "water plants".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+
+        state.focus_sidebar(0); // Inbox
+        assert_eq!(state.highlighted_task, Some(task_id));
+
+        state.exit_sidebar_focus();
+        assert!(!state.sidebar_focused);
+        // The already-synced highlight carries over unchanged.
+        assert_eq!(state.highlighted_task, Some(task_id));
+        assert_eq!(state.selection, Selection::None);
+    }
+
+    #[test]
+    fn detail_panel_opens_on_selection_and_closes_when_cleared() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "water plants".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        assert!(!state.detail_panel_open);
+
+        state.select_task(task_id);
+        assert!(state.detail_panel_open);
+
+        // Switching perspective clears the selection, and the panel with it.
+        state.set_perspective(Perspective::Today);
+        assert!(!state.detail_panel_open);
+
+        state.set_perspective(Perspective::Inbox);
+        state.select_task(task_id);
+        assert!(state.detail_panel_open);
+
+        // Toggling details closed via Enter also closes the panel.
+        state.highlighted_task = Some(task_id);
+        state.toggle_highlighted_task_details();
+        assert_eq!(state.selection, Selection::None);
+        assert!(!state.detail_panel_open);
+    }
+
+    #[test]
+    fn detail_panel_toggle_button_works_regardless_of_selection() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        assert!(!state.detail_panel_open);
+        assert_eq!(state.selection, Selection::None);
+
+        // The info button can force it open with nothing selected.
+        state.toggle_detail_panel();
+        assert!(state.detail_panel_open);
+
+        state.toggle_detail_panel();
+        assert!(!state.detail_panel_open);
+    }
+
+    #[test]
+    fn deleting_the_selected_task_closes_the_detail_panel() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "water plants".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+
+        state.select_task(task_id);
+        assert!(state.detail_panel_open);
+
+        state.delete_task(task_id);
+        assert!(!state.detail_panel_open);
     }
 }

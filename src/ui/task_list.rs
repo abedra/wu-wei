@@ -1,9 +1,11 @@
+use chrono::Utc;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
 use crate::domain::project::ProjectId;
 use crate::domain::task::TaskId;
 use crate::state::{AppState, Selection};
+use crate::ui::theme;
 
 pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     let project_name = |id: Option<ProjectId>, state: &AppState| -> String {
@@ -21,6 +23,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     let mut to_toggle_complete: Option<(TaskId, bool)> = None;
     let mut to_toggle_flag: Option<(TaskId, bool)> = None;
     let mut to_select: Option<TaskId> = None;
+    let today = Utc::now().date_naive();
 
     TableBuilder::new(ui)
         .striped(true)
@@ -29,7 +32,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
         .column(Column::remainder()) // title
         .column(Column::auto().at_least(90.0)) // due date
         .column(Column::auto().at_least(80.0)) // project
-        .header(20.0, |mut header| {
+        .header(24.0, |mut header| {
             header.col(|ui| {
                 ui.strong("");
             });
@@ -47,12 +50,13 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
             });
         })
         .body(|body| {
-            body.rows(20.0, state.visible_tasks.len(), |mut row| {
+            body.rows(24.0, state.visible_tasks.len(), |mut row| {
                 let task = &state.visible_tasks[row.index()];
                 let task_id = task.id;
                 let mut completed = task.completed;
                 let flagged = task.flagged;
                 let title = task.title.clone();
+                let overdue = task.due_date.is_some_and(|d| d < today) && !completed;
                 let due = task
                     .due_date
                     .map(|d| d.format("%Y-%m-%d").to_string())
@@ -73,20 +77,34 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                 });
                 row.col(|ui| {
                     let flag_label = if flagged { "\u{2691}" } else { "\u{2690}" };
-                    if ui.selectable_label(flagged, flag_label).clicked() {
+                    let flag_text = if flagged {
+                        egui::RichText::new(flag_label).color(theme::FLAG)
+                    } else {
+                        egui::RichText::new(flag_label).weak()
+                    };
+                    if ui.selectable_label(flagged, flag_text).clicked() {
                         to_toggle_flag = Some((task_id, !flagged));
                     }
                 });
                 row.col(|ui| {
-                    if ui.selectable_label(is_open, &title).clicked() {
+                    let mut text = egui::RichText::new(&title);
+                    if completed {
+                        text = text.strikethrough().weak();
+                    }
+                    if ui.selectable_label(is_open, text).clicked() {
                         to_select = Some(task_id);
                     }
                 });
                 row.col(|ui| {
-                    ui.label(due);
+                    let text = if overdue {
+                        egui::RichText::new(due).color(theme::OVERDUE)
+                    } else {
+                        egui::RichText::new(due)
+                    };
+                    ui.label(text);
                 });
                 row.col(|ui| {
-                    ui.label(project);
+                    ui.weak(project);
                 });
             });
         });

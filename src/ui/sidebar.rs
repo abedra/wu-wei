@@ -1,19 +1,32 @@
 use eframe::egui;
 
 use crate::state::{AppState, Perspective};
+use crate::ui::theme;
 
 pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.heading("loa");
-    ui.separator();
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.heading(egui::RichText::new("loa").color(theme::ACCENT).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // The info button: shows/hides the detail panel regardless of
+            // selection (it otherwise opens and closes automatically).
+            if ui
+                .selectable_label(state.detail_panel_open, "Details")
+                .on_hover_text("Toggle the detail panel")
+                .clicked()
+            {
+                state.toggle_detail_panel();
+            }
+        });
+    });
+    ui.add_space(8.0);
 
     let entries = state.sidebar_entries();
     for (index, perspective) in entries.iter().copied().enumerate() {
         if perspective == Perspective::AllProjects {
-            ui.separator();
-            ui.label("Projects");
+            section_label(ui, "Projects");
         } else if perspective == Perspective::AllTags {
-            ui.separator();
-            ui.label("Tags");
+            section_label(ui, "Tags");
         }
 
         let label = label_for(state, perspective);
@@ -22,6 +35,12 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
             state.focus_sidebar(index);
         }
     }
+}
+
+fn section_label(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(10.0);
+    ui.label(egui::RichText::new(text.to_uppercase()).small().weak());
+    ui.add_space(2.0);
 }
 
 fn label_for(state: &AppState, perspective: Perspective) -> String {

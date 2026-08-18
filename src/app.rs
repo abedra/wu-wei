@@ -26,25 +26,28 @@ impl eframe::App for LoaApp {
 
         egui::Panel::left("sidebar")
             .resizable(true)
-            .default_size(180.0)
+            .default_size(200.0)
+            .frame(ui::theme::sidebar_frame(ui.style()))
             .show(ui, |ui| ui::sidebar::draw(ui, &mut self.state));
 
-        egui::Panel::right("detail")
-            .resizable(true)
-            .default_size(320.0)
-            .show(ui, |ui| match self.state.selection {
-                Selection::Task(_) => ui::task_detail::draw(ui, &mut self.state),
-                Selection::Project(_) => ui::project_view::draw_detail(ui, &mut self.state),
-                Selection::Tag(_) => ui::tag_view::draw_detail(ui, &mut self.state),
-                Selection::None => {
-                    ui.label("Select a task, project, or tag.");
-                }
-            });
+        if self.state.detail_panel_open {
+            egui::Panel::right("detail")
+                .resizable(true)
+                .default_size(320.0)
+                .show(ui, |ui| match self.state.selection {
+                    Selection::Task(_) => ui::task_detail::draw(ui, &mut self.state),
+                    Selection::Project(_) => ui::project_view::draw_detail(ui, &mut self.state),
+                    Selection::Tag(_) => ui::tag_view::draw_detail(ui, &mut self.state),
+                    Selection::None => {
+                        ui.label("Select a task, project, or tag.");
+                    }
+                });
+        }
 
         if let Some(msg) = self.state.error_message.clone() {
             egui::Panel::bottom("error_bar").show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::RED, msg);
+                    ui.colored_label(ui.visuals().error_fg_color, msg);
                     if ui.button("Dismiss").clicked() {
                         self.state.error_message = None;
                     }
