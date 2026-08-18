@@ -1,3 +1,5 @@
+use std::sync::mpsc::{Receiver, TryRecvError};
+
 use chrono::{Datelike, Duration, NaiveDate, Utc, Weekday};
 use rusqlite::Connection;
 
@@ -6,6 +8,7 @@ use crate::db::{project_repo, tag_repo, task_repo};
 use crate::domain::project::{Project, ProjectId, ProjectKind, ProjectStatus};
 use crate::domain::tag::{Tag, TagId};
 use crate::domain::task::{Task, TaskId};
+use crate::llm::{self, LlmConfig, ParsedTask, PromptContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Perspective {
@@ -202,6 +205,13 @@ pub struct AppState {
     /// (the info button — see `AppState::toggle_detail_panel`).
     pub detail_panel_open: bool,
     pub error_message: Option<String>,
+    /// `None` when no provider is configured (see `LlmConfig::from_env`) —
+    /// AI-assisted capture is simply unavailable, not an error, until set up.
+    pub llm_config: Option<LlmConfig>,
+    /// Set while a background AI-parse request is in flight; polled once per
+    /// frame in `poll_llm`. Dropping it (e.g. on cancel) discards the reply.
+    pub llm_pending: Option<Receiver<Result<ParsedTask, String>>>,
+    pub llm_busy: bool,
 }
 
 impl AppState {
@@ -226,6 +236,9 @@ impl AppState {
             sidebar_focused: false,
             detail_panel_open: false,
             error_message: None,
+            llm_config: LlmConfig::from_env(),
+            llm_pending: None,
+            llm_busy: false,
         };
         state.refresh_projects();
         state.refresh_tags();
@@ -353,6 +366,8 @@ impl AppState {
     pub fn close_quick_capture(&mut self) {
         self.quick_capture_open = false;
         self.quick_entry_buffer.clear();
+        self.llm_pending = None;
+        self.llm_busy = false;
     }
 
     pub fn quick_capture_submit(&mut self) {
@@ -370,6 +385,99 @@ impl AppState {
             self.error_message = Some(e.to_string());
             return;
         }
+        self.quick_entry_buffer.clear();
+        self.quick_capture_open = false;
+        self.refresh_visible_tasks();
+    }
+
+    pub fn llm_available(&self) -> bool {
+        self.llm_config.is_some()
+    }
+
+    /// Enter in the quick-capture popup: sends the raw text to the configured
+    /// LLM on a background thread to extract structured fields, instead of
+    /// capturing it literally. Falls back to a plain `quick_capture_submit`
+    /// if no provider is configured, so this is always safe to call.
+    pub fn quick_capture_submit_with_ai(&mut self) {
+        let Some(config) = self.llm_config.clone() else {
+            self.quick_capture_submit();
+            return;
+        };
+        let raw_text = self.quick_entry_buffer.trim().to_string();
+        if raw_text.is_empty() {
+            return;
+        }
+        let context = PromptContext {
+            today: Utc::now().date_naive(),
+            project_names: self.projects.iter().map(|p| p.name.clone()).collect(),
+        };
+        self.llm_pending = Some(llm::parse_capture_async(config, raw_text, context));
+        self.llm_busy = true;
+    }
+
+    /// Polled once per frame from `app.rs`. Non-blocking: does nothing while
+    /// the background request is still running.
+    pub fn poll_llm(&mut self) {
+        let Some(rx) = &self.llm_pending else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(parsed)) => {
+                self.llm_pending = None;
+                self.llm_busy = false;
+                self.apply_parsed_task(parsed);
+            }
+            Ok(Err(e)) => {
+                self.llm_pending = None;
+                self.llm_busy = false;
+                self.error_message = Some(format!("AI capture failed, added as typed: {e}"));
+                self.quick_capture_submit();
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.llm_pending = None;
+                self.llm_busy = false;
+            }
+        }
+    }
+
+    /// Turns an LLM-parsed capture into a real task: matches `project` by
+    /// name against known projects (never creates one — the prompt already
+    /// tells the model not to invent names) and gets-or-creates each tag.
+    fn apply_parsed_task(&mut self, parsed: ParsedTask) {
+        let mut task = Task::new_inbox(parsed.title);
+        task.due_date = parsed.due_date;
+        task.flagged = parsed.flagged;
+
+        if let Some(name) = parsed.project {
+            task.project_id = self
+                .projects
+                .iter()
+                .find(|p| p.name.eq_ignore_ascii_case(&name))
+                .map(|p| p.id);
+        } else if let Perspective::Project(id) = self.perspective {
+            task.project_id = Some(id);
+        }
+
+        let mut tag_ids = Vec::new();
+        for name in &parsed.tags {
+            match tag_repo::get_or_create_by_name(&self.conn, name) {
+                Ok(tag) => tag_ids.push(tag.id),
+                Err(e) => self.error_message = Some(e.to_string()),
+            }
+        }
+        if let Perspective::Tag(id) = self.perspective
+            && !tag_ids.contains(&id)
+        {
+            tag_ids.push(id);
+        }
+        task.tags = tag_ids;
+
+        if let Err(e) = task_repo::create(&self.conn, &task) {
+            self.error_message = Some(e.to_string());
+            return;
+        }
+        self.refresh_tags();
         self.quick_entry_buffer.clear();
         self.quick_capture_open = false;
         self.refresh_visible_tasks();
@@ -898,6 +1006,94 @@ mod tests {
 
         assert_eq!(state.visible_tasks.len(), 1);
         assert_eq!(state.visible_tasks[0].tags, vec![tag_id]);
+    }
+
+    #[test]
+    fn apply_parsed_task_matches_project_case_insensitively_and_sets_due_date() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.new_project_name = "Kitchen Remodel".to_string();
+        state.create_project();
+        let project_id = state.projects[0].id;
+        let due = chrono::NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+
+        state.apply_parsed_task(ParsedTask {
+            title: "pick tile".to_string(),
+            due_date: Some(due),
+            tags: vec![],
+            project: Some("kitchen remodel".to_string()),
+            flagged: false,
+        });
+
+        // Perspective is still Inbox, so the project-filed task shouldn't show here.
+        assert_eq!(state.visible_tasks.len(), 0);
+
+        state.set_perspective(Perspective::Project(project_id));
+        assert_eq!(state.visible_tasks.len(), 1);
+        assert_eq!(state.visible_tasks[0].project_id, Some(project_id));
+        assert_eq!(state.visible_tasks[0].due_date, Some(due));
+    }
+
+    #[test]
+    fn apply_parsed_task_falls_back_to_current_project_perspective() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.new_project_name = "Kitchen Remodel".to_string();
+        state.create_project();
+        let project_id = state.projects[0].id;
+        state.set_perspective(Perspective::Project(project_id));
+
+        state.apply_parsed_task(ParsedTask {
+            title: "pick tile".to_string(),
+            due_date: None,
+            tags: vec![],
+            project: None,
+            flagged: false,
+        });
+
+        assert_eq!(state.visible_tasks.len(), 1);
+        assert_eq!(state.visible_tasks[0].project_id, Some(project_id));
+    }
+
+    #[test]
+    fn apply_parsed_task_never_invents_an_unknown_project() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+
+        state.apply_parsed_task(ParsedTask {
+            title: "pick tile".to_string(),
+            due_date: None,
+            tags: vec![],
+            project: Some("Nonexistent Project".to_string()),
+            flagged: false,
+        });
+
+        assert!(state.projects.is_empty());
+        assert_eq!(state.visible_tasks.len(), 1);
+        assert!(state.visible_tasks[0].project_id.is_none());
+    }
+
+    #[test]
+    fn apply_parsed_task_creates_tags_and_keeps_current_tag_perspective() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.new_tag_name = "errand".to_string();
+        state.create_tag();
+        let errand_id = state.tags[0].id;
+        state.set_perspective(Perspective::Tag(errand_id));
+
+        state.apply_parsed_task(ParsedTask {
+            title: "buy stamps".to_string(),
+            due_date: None,
+            tags: vec!["shopping".to_string()],
+            project: None,
+            flagged: true,
+        });
+
+        assert_eq!(state.tags.len(), 2);
+        let shopping_id = state.tags.iter().find(|t| t.name == "shopping").unwrap().id;
+        assert_eq!(state.visible_tasks.len(), 1);
+        let actual = &state.visible_tasks[0].tags;
+        assert_eq!(actual.len(), 2);
+        assert!(actual.contains(&shopping_id));
+        assert!(actual.contains(&errand_id));
+        assert!(state.visible_tasks[0].flagged);
     }
 
     #[test]

@@ -19,6 +19,7 @@ impl LoaApp {
 impl eframe::App for LoaApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.state.poll_llm();
         ui::shortcuts::handle(&ctx, &mut self.state);
         ui::project_picker::draw(&ctx, &mut self.state);
         ui::due_date_picker::draw(&ctx, &mut self.state);

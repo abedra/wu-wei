@@ -35,13 +35,27 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
     }
     let label = target_label(state);
 
+    let llm_available = state.llm_available();
+
     egui::Window::new("New Task")
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
         .show(ctx, |ui| {
             ui.label(label);
-            ui.add(egui::TextEdit::singleline(&mut state.quick_entry_buffer).id(field_id()));
-            ui.label("Enter to add - Esc to cancel");
+            ui.add_enabled(
+                !state.llm_busy,
+                egui::TextEdit::singleline(&mut state.quick_entry_buffer).id(field_id()),
+            );
+            if state.llm_busy {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.weak("Asking the AI to parse this...");
+                });
+            } else if llm_available {
+                ui.label("Enter to add (parsed by AI) - Esc to cancel");
+            } else {
+                ui.label("Enter to add - Esc to cancel");
+            }
         });
 }

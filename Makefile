@@ -1,0 +1,61 @@
+.DEFAULT_GOAL := help
+
+# Pull in local config (API keys, DB path override, ...) if present.
+# See .env for the list of supported variables. Never committed (.gitignore).
+ifneq (,$(wildcard ./.env))
+    include .env
+    export
+endif
+
+.PHONY: help doctor run build release test fmt fmt-check clippy check clean
+
+help:
+	@echo "loa — available targets:"
+	@echo "  doctor      check that required tools are installed"
+	@echo "  run         run the app (cargo run)"
+	@echo "  build       debug build"
+	@echo "  release     release build"
+	@echo "  test        run the test suite"
+	@echo "  fmt         apply rustfmt"
+	@echo "  fmt-check   check formatting without writing changes"
+	@echo "  clippy      run clippy lints (all targets)"
+	@echo "  check       fmt-check + clippy + test"
+	@echo "  clean       cargo clean"
+
+## Verifies the toolchain this project needs is on PATH:
+##   - cargo/rustc (edition 2024 requires rustc >= 1.85)
+##   - a C compiler (cc), needed to build bundled SQLite and rustls' ring backend
+doctor:
+	@command -v cargo >/dev/null 2>&1 && echo "OK  cargo: $$(cargo --version)" \
+		|| { echo "MISSING  cargo (install via https://rustup.rs)"; exit 1; }
+	@command -v rustc >/dev/null 2>&1 && echo "OK  rustc: $$(rustc --version)" \
+		|| { echo "MISSING  rustc (install via https://rustup.rs)"; exit 1; }
+	@command -v cc >/dev/null 2>&1 && echo "OK  cc: $$(cc --version | head -1)" \
+		|| { echo "MISSING  cc (a C compiler is required to build bundled SQLite/ring)"; exit 1; }
+	@if [ -f .env ]; then echo "OK  .env found"; else echo "NOTE  no .env — AI-assisted capture will be disabled"; fi
+
+run:
+	cargo run
+
+build:
+	cargo build
+
+release:
+	cargo build --release
+
+test:
+	cargo test
+
+fmt:
+	cargo fmt
+
+fmt-check:
+	cargo fmt -- --check
+
+clippy:
+	cargo clippy --all-targets
+
+check: fmt-check clippy test
+
+clean:
+	cargo clean

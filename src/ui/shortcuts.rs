@@ -82,12 +82,17 @@ fn handle_perspective_switches(ctx: &egui::Context, state: &mut AppState) {
 }
 
 /// Cmd+N pops open the quick-capture window and focuses its field. While
-/// open, it owns Enter (submit) and Escape (cancel) — this is why it's
-/// checked first in `handle`, ahead of the other any-picker-open handlers.
+/// open, it owns Enter (submit, parsed by AI when one is configured — see
+/// `AppState::quick_capture_submit_with_ai`) and Escape (cancel) — this is
+/// why it's checked first in `handle`, ahead of the other any-picker-open
+/// handlers.
 fn handle_quick_capture(ctx: &egui::Context, state: &mut AppState) {
     if state.quick_capture_open {
+        if state.llm_busy {
+            return;
+        }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
-            state.quick_capture_submit();
+            state.quick_capture_submit_with_ai();
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             state.close_quick_capture();

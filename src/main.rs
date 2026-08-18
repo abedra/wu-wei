@@ -1,6 +1,7 @@
 mod app;
 mod db;
 mod domain;
+mod llm;
 mod state;
 mod ui;
 
