@@ -4,11 +4,11 @@ use rusqlite::Connection;
 use crate::state::{AppState, Selection};
 use crate::ui;
 
-pub struct LoaApp {
+pub struct WuWeiApp {
     state: AppState,
 }
 
-impl LoaApp {
+impl WuWeiApp {
     pub fn new(conn: Connection) -> Self {
         Self {
             state: AppState::new(conn),
@@ -16,7 +16,7 @@ impl LoaApp {
     }
 }
 
-impl eframe::App for LoaApp {
+impl eframe::App for WuWeiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.state.poll_llm();

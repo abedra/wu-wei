@@ -1961,24 +1961,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
-name = "loa"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "eframe",
- "egui",
- "egui_extras",
- "jiff",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "ureq",
- "uuid",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4562,6 +4544,24 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "wu-wei"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "jiff",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "ureq",
+ "uuid",
+]
 
 [[package]]
 name = "x11-dl"

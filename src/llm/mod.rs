@@ -144,13 +144,13 @@ impl LlmConfig {
     /// Returns `None` when no API key is configured — AI-assisted capture is
     /// opt-in and simply unavailable (not an error) until the user sets it up.
     ///
-    /// - `LOA_LLM_PROVIDER` — `openai` (default) or `anthropic`.
-    /// - `LOA_LLM_API_KEY` — overrides the provider-specific env var below.
-    /// - `LOA_LLM_BASE_URL` — overrides the provider default (e.g. to point
+    /// - `WU_WEI_LLM_PROVIDER` — `openai` (default) or `anthropic`.
+    /// - `WU_WEI_LLM_API_KEY` — overrides the provider-specific env var below.
+    /// - `WU_WEI_LLM_BASE_URL` — overrides the provider default (e.g. to point
     ///   the OpenAI-compatible client at a local server).
-    /// - `LOA_LLM_MODEL` — overrides the provider default model.
+    /// - `WU_WEI_LLM_MODEL` — overrides the provider default model.
     pub fn from_env() -> Option<Self> {
-        let provider = match std::env::var("LOA_LLM_PROVIDER").as_deref() {
+        let provider = match std::env::var("WU_WEI_LLM_PROVIDER").as_deref() {
             Ok("anthropic") => ProviderKind::Anthropic,
             _ => ProviderKind::OpenAi,
         };
@@ -162,12 +162,13 @@ impl LlmConfig {
                 "claude-opus-5",
             ),
         };
-        let api_key = std::env::var("LOA_LLM_API_KEY")
+        let api_key = std::env::var("WU_WEI_LLM_API_KEY")
             .or_else(|_| std::env::var(default_key_var))
             .ok()?;
-        let base_url =
-            std::env::var("LOA_LLM_BASE_URL").unwrap_or_else(|_| default_base_url.to_string());
-        let model = std::env::var("LOA_LLM_MODEL").unwrap_or_else(|_| default_model.to_string());
+        let base_url = std::env::var("WU_WEI_LLM_BASE_URL")
+            .unwrap_or_else(|_| default_base_url.to_string());
+        let model =
+            std::env::var("WU_WEI_LLM_MODEL").unwrap_or_else(|_| default_model.to_string());
         Some(LlmConfig {
             provider,
             api_key,

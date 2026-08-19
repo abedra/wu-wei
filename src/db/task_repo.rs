@@ -91,7 +91,7 @@ pub fn list_inbox(conn: &Connection) -> DbResult<Vec<Task>> {
 pub fn list_by_project(conn: &Connection, project_id: ProjectId) -> DbResult<Vec<Task>> {
     list_where(
         conn,
-        "project_id = ?1",
+        "project_id = ?1 AND completed = 0",
         params![project_id.0.to_string()],
         "created_at",
     )
@@ -325,6 +325,10 @@ mod tests {
         assert_eq!(by_project.len(), 1);
         assert_eq!(by_project[0].title, "project item");
 
+        set_completed(&conn, project_task.id, true).unwrap();
+        let by_project = list_by_project(&conn, project.id).unwrap();
+        assert!(by_project.is_empty());
+
         let today_list = list_today(&conn, today).unwrap();
         let today_titles: Vec<&str> = today_list.iter().map(|t| t.title.as_str()).collect();
         assert!(today_titles.contains(&"due today"));
@@ -344,7 +348,7 @@ mod tests {
         assert!(!today_list.iter().any(|t| t.id == today_task.id));
 
         let completed = list_completed(&conn).unwrap();
-        assert_eq!(completed.len(), 2);
+        assert_eq!(completed.len(), 3);
         assert!(completed.iter().all(|t| t.completed_at.is_some()));
     }
 

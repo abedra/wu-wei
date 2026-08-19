@@ -79,7 +79,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
         }
     });
     if !llm_available {
-        ui.weak("Set LOA_LLM_API_KEY (or a provider-specific key) to enable AI chat.");
+        ui.weak("Set WU_WEI_LLM_API_KEY (or a provider-specific key) to enable AI chat.");
     }
 
     if send_clicked {

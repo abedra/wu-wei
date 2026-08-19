@@ -6,7 +6,7 @@ use crate::ui::theme;
 pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.heading(egui::RichText::new("loa").color(theme::ACCENT).strong());
+        ui.heading(egui::RichText::new("Wu Wei").color(theme::ACCENT).strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // The info button: shows/hides the detail panel regardless of
             // selection (it otherwise opens and closes automatically).

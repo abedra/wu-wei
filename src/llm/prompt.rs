@@ -185,7 +185,7 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
     .unwrap_or_else(|_| "[]".to_string());
 
     format!(
-        "You are an assistant embedded in loa, a GTD-style task manager. The user gives you \
+        "You are an assistant embedded in Wu Wei, a GTD-style task manager. The user gives you \
          commands about their tasks in natural language, e.g. \"roll all of my overdue tasks \
          to today\" or \"move the dentist task to Health\". Today's date is {today} \
          ({today_weekday}). \

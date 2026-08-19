@@ -464,7 +464,7 @@ impl AppState {
         let Some(config) = self.llm_config.clone() else {
             self.chat_history.push(ChatTurn {
                 role: ChatRole::Assistant,
-                content: "AI chat isn't configured — set LOA_LLM_API_KEY (or a \
+                content: "AI chat isn't configured — set WU_WEI_LLM_API_KEY (or a \
                           provider-specific key) to enable it."
                     .to_string(),
             });

@@ -10,7 +10,7 @@ endif
 .PHONY: help doctor run build release test fmt fmt-check clippy check clean
 
 help:
-	@echo "loa — available targets:"
+	@echo "wu-wei — available targets:"
 	@echo "  doctor      check that required tools are installed"
 	@echo "  run         run the app (cargo run)"
 	@echo "  build       debug build"
