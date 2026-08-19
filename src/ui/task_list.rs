@@ -21,21 +21,16 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     };
 
     let mut to_toggle_complete: Option<(TaskId, bool)> = None;
-    let mut to_toggle_flag: Option<(TaskId, bool)> = None;
     let mut to_select: Option<TaskId> = None;
     let today = Local::now().date_naive();
 
     TableBuilder::new(ui)
         .striped(true)
         .column(Column::auto()) // complete
-        .column(Column::auto()) // flag
         .column(Column::remainder()) // title
         .column(Column::auto().at_least(90.0)) // due date
         .column(Column::auto().at_least(80.0)) // project
         .header(24.0, |mut header| {
-            header.col(|ui| {
-                ui.strong("");
-            });
             header.col(|ui| {
                 ui.strong("");
             });
@@ -54,7 +49,6 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                 let task = &state.visible_tasks[row.index()];
                 let task_id = task.id;
                 let mut completed = task.completed;
-                let flagged = task.flagged;
                 let title = task.title.clone();
                 let overdue = task.due_date.is_some_and(|d| d < today) && !completed;
                 let due = task
@@ -73,17 +67,6 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                 row.col(|ui| {
                     if ui.checkbox(&mut completed, "").changed() {
                         to_toggle_complete = Some((task_id, completed));
-                    }
-                });
-                row.col(|ui| {
-                    let flag_label = if flagged { "\u{2691}" } else { "\u{2690}" };
-                    let flag_text = if flagged {
-                        egui::RichText::new(flag_label).color(theme::FLAG)
-                    } else {
-                        egui::RichText::new(flag_label).weak()
-                    };
-                    if ui.selectable_label(flagged, flag_text).clicked() {
-                        to_toggle_flag = Some((task_id, !flagged));
                     }
                 });
                 row.col(|ui| {
@@ -116,9 +99,6 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
 
     if let Some((id, completed)) = to_toggle_complete {
         state.toggle_complete(id, completed);
-    }
-    if let Some((id, flagged)) = to_toggle_flag {
-        state.toggle_flag(id, flagged);
     }
     if let Some(id) = to_select {
         state.select_task(id);

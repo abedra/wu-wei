@@ -17,7 +17,6 @@ pub struct ParsedTask {
     pub due_date: Option<NaiveDate>,
     pub tags: Vec<String>,
     pub project: Option<String>,
-    pub flagged: bool,
     pub recurrence: Option<Recurrence>,
 }
 
@@ -49,7 +48,6 @@ pub struct ChatTaskSummary {
     pub title: String,
     pub project: Option<String>,
     pub due_date: Option<NaiveDate>,
-    pub flagged: bool,
     pub tags: Vec<String>,
 }
 
@@ -86,12 +84,6 @@ pub enum ChatAction {
         task_id: TaskId,
     },
     ReopenTask {
-        task_id: TaskId,
-    },
-    FlagTask {
-        task_id: TaskId,
-    },
-    UnflagTask {
         task_id: TaskId,
     },
     MoveToProject {

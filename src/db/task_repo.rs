@@ -10,9 +10,9 @@ use crate::domain::task::{Recurrence, RecurrenceUnit, Task, TaskId};
 pub fn create(conn: &Connection, task: &Task) -> DbResult<()> {
     conn.execute(
         "INSERT INTO tasks (id, title, notes, project_id, due_date, defer_date,
-                             flagged, completed, completed_at, created_at, estimated_minutes,
+                             completed, completed_at, created_at, estimated_minutes,
                              recurrence_interval, recurrence_unit)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             task.id.0.to_string(),
             task.title,
@@ -20,7 +20,6 @@ pub fn create(conn: &Connection, task: &Task) -> DbResult<()> {
             task.project_id.map(|p| p.0.to_string()),
             task.due_date,
             task.defer_date,
-            task.flagged,
             task.completed,
             task.completed_at,
             task.created_at,
@@ -36,9 +35,9 @@ pub fn create(conn: &Connection, task: &Task) -> DbResult<()> {
 pub fn update(conn: &Connection, task: &Task) -> DbResult<()> {
     conn.execute(
         "UPDATE tasks SET title = ?2, notes = ?3, project_id = ?4, due_date = ?5,
-                           defer_date = ?6, flagged = ?7, completed = ?8,
-                           completed_at = ?9, estimated_minutes = ?10,
-                           recurrence_interval = ?11, recurrence_unit = ?12
+                           defer_date = ?6, completed = ?7,
+                           completed_at = ?8, estimated_minutes = ?9,
+                           recurrence_interval = ?10, recurrence_unit = ?11
          WHERE id = ?1",
         params![
             task.id.0.to_string(),
@@ -47,7 +46,6 @@ pub fn update(conn: &Connection, task: &Task) -> DbResult<()> {
             task.project_id.map(|p| p.0.to_string()),
             task.due_date,
             task.defer_date,
-            task.flagged,
             task.completed,
             task.completed_at,
             task.estimated_minutes,
@@ -70,7 +68,7 @@ pub fn delete(conn: &Connection, id: TaskId) -> DbResult<()> {
 pub fn get(conn: &Connection, id: TaskId) -> DbResult<Option<Task>> {
     let task = conn
         .query_row(
-            "SELECT id, title, notes, project_id, due_date, defer_date, flagged,
+            "SELECT id, title, notes, project_id, due_date, defer_date,
                     completed, completed_at, created_at, estimated_minutes,
                     recurrence_interval, recurrence_unit
              FROM tasks WHERE id = ?1",
@@ -107,7 +105,7 @@ pub fn list_by_project(conn: &Connection, project_id: ProjectId) -> DbResult<Vec
 
 pub fn list_by_tag(conn: &Connection, tag_id: TagId) -> DbResult<Vec<Task>> {
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.title, t.notes, t.project_id, t.due_date, t.defer_date, t.flagged,
+        "SELECT t.id, t.title, t.notes, t.project_id, t.due_date, t.defer_date,
                 t.completed, t.completed_at, t.created_at, t.estimated_minutes,
                 t.recurrence_interval, t.recurrence_unit
          FROM tasks t
@@ -142,15 +140,6 @@ pub fn list_overdue(conn: &Connection, today: NaiveDate) -> DbResult<Vec<Task>> 
     )
 }
 
-pub fn list_flagged(conn: &Connection) -> DbResult<Vec<Task>> {
-    list_where(
-        conn,
-        "flagged = 1 AND completed = 0",
-        params![],
-        "created_at",
-    )
-}
-
 pub fn list_completed(conn: &Connection) -> DbResult<Vec<Task>> {
     list_where(conn, "completed = 1", params![], "completed_at DESC")
 }
@@ -160,14 +149,6 @@ pub fn set_completed(conn: &Connection, id: TaskId, completed: bool) -> DbResult
     conn.execute(
         "UPDATE tasks SET completed = ?2, completed_at = ?3 WHERE id = ?1",
         params![id.0.to_string(), completed, completed_at],
-    )?;
-    Ok(())
-}
-
-pub fn set_flagged(conn: &Connection, id: TaskId, flagged: bool) -> DbResult<()> {
-    conn.execute(
-        "UPDATE tasks SET flagged = ?2 WHERE id = ?1",
-        params![id.0.to_string(), flagged],
     )?;
     Ok(())
 }
@@ -231,7 +212,7 @@ fn list_where(
     order_by: &str,
 ) -> DbResult<Vec<Task>> {
     let sql = format!(
-        "SELECT id, title, notes, project_id, due_date, defer_date, flagged,
+        "SELECT id, title, notes, project_id, due_date, defer_date,
                 completed, completed_at, created_at, estimated_minutes,
                 recurrence_interval, recurrence_unit
          FROM tasks WHERE {where_clause} ORDER BY {order_by}"
@@ -247,8 +228,8 @@ fn list_where(
 fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     let id: String = row.get(0)?;
     let project_id: Option<String> = row.get(3)?;
-    let recurrence_interval: Option<u32> = row.get(11)?;
-    let recurrence_unit: Option<String> = row.get(12)?;
+    let recurrence_interval: Option<u32> = row.get(10)?;
+    let recurrence_unit: Option<String> = row.get(11)?;
     let recurrence = recurrence_interval
         .zip(recurrence_unit)
         .map(|(interval, unit)| Recurrence {
@@ -271,11 +252,10 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         }),
         due_date: row.get(4)?,
         defer_date: row.get(5)?,
-        flagged: row.get(6)?,
-        completed: row.get(7)?,
-        completed_at: row.get(8)?,
-        created_at: row.get(9)?,
-        estimated_minutes: row.get(10)?,
+        completed: row.get(6)?,
+        completed_at: row.get(7)?,
+        created_at: row.get(8)?,
+        estimated_minutes: row.get(9)?,
         tags: Vec::new(),
         recurrence,
     })
@@ -396,10 +376,6 @@ mod tests {
         project_task.project_id = Some(project.id);
         create(&conn, &project_task).unwrap();
 
-        let mut flagged_task = Task::new_inbox("flagged item");
-        flagged_task.flagged = true;
-        create(&conn, &flagged_task).unwrap();
-
         let today = Utc::now().date_naive();
         let mut today_task = Task::new_inbox("due today");
         today_task.due_date = Some(today);
@@ -414,16 +390,12 @@ mod tests {
         create(&conn, &future_task).unwrap();
 
         let inbox = list_inbox(&conn).unwrap();
-        assert_eq!(inbox.len(), 5); // everything except project_task
+        assert_eq!(inbox.len(), 4); // everything except project_task
         assert!(inbox.iter().all(|t| t.project_id.is_none()));
 
         let by_project = list_by_project(&conn, project.id).unwrap();
         assert_eq!(by_project.len(), 1);
         assert_eq!(by_project[0].title, "project item");
-
-        let flagged = list_flagged(&conn).unwrap();
-        assert_eq!(flagged.len(), 1);
-        assert_eq!(flagged[0].title, "flagged item");
 
         let today_list = list_today(&conn, today).unwrap();
         let today_titles: Vec<&str> = today_list.iter().map(|t| t.title.as_str()).collect();

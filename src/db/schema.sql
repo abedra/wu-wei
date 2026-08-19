@@ -16,7 +16,6 @@ CREATE TABLE IF NOT EXISTS tasks (
     project_id          TEXT REFERENCES projects(id) ON DELETE SET NULL,
     due_date            TEXT,
     defer_date          TEXT,
-    flagged             INTEGER NOT NULL DEFAULT 0,
     completed           INTEGER NOT NULL DEFAULT 0,
     completed_at        TEXT,
     created_at          TEXT NOT NULL,

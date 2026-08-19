@@ -153,7 +153,6 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
         dirty |= date_field(ui, "Due date", &mut buf.due_date);
         dirty |= date_field(ui, "Defer date", &mut buf.defer_date);
         dirty |= recurrence_field(ui, &mut buf.recurrence, &mut buf.due_date);
-        dirty |= ui.checkbox(&mut buf.flagged, "Flagged").changed();
 
         let mut completed = buf.completed;
         if ui.checkbox(&mut completed, "Completed").changed() {

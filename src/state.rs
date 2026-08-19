@@ -18,7 +18,6 @@ pub enum Perspective {
     Inbox,
     Today,
     Overdue,
-    Flagged,
     Completed,
     Project(ProjectId),
     AllTags,
@@ -98,7 +97,6 @@ pub struct TaskEditBuffer {
     pub project_id: Option<ProjectId>,
     pub due_date: Option<NaiveDate>,
     pub defer_date: Option<NaiveDate>,
-    pub flagged: bool,
     pub completed: bool,
     pub completed_at: Option<chrono::DateTime<Utc>>,
     pub created_at: chrono::DateTime<Utc>,
@@ -127,7 +125,6 @@ impl TaskEditBuffer {
             project_id: task.project_id,
             due_date: task.due_date,
             defer_date: task.defer_date,
-            flagged: task.flagged,
             completed: task.completed,
             completed_at: task.completed_at,
             created_at: task.created_at,
@@ -184,7 +181,7 @@ pub struct AppState {
     /// Independent of `selection`: moving it does not open the detail panel
     /// (mirrors OmniFocus, where arrow keys move the row cursor without
     /// forcing the inspector open). `Enter` toggles the detail panel for
-    /// whichever task this points at; Space/flag/delete/move-to-project all
+    /// whichever task this points at; Space/delete/move-to-project all
     /// act on it too, whether or not the detail panel happens to be open.
     pub highlighted_task: Option<TaskId>,
     pub task_edit_buffer: Option<TaskEditBuffer>,
@@ -306,7 +303,6 @@ impl AppState {
             Perspective::Inbox,
             Perspective::Today,
             Perspective::Overdue,
-            Perspective::Flagged,
             Perspective::Completed,
         ];
         entries.extend(self.projects.iter().map(|p| Perspective::Project(p.id)));
@@ -363,7 +359,6 @@ impl AppState {
             Perspective::Inbox => task_repo::list_inbox(&self.conn),
             Perspective::Today => task_repo::list_today(&self.conn, today),
             Perspective::Overdue => task_repo::list_overdue(&self.conn, today),
-            Perspective::Flagged => task_repo::list_flagged(&self.conn),
             Perspective::Completed => task_repo::list_completed(&self.conn),
             Perspective::Project(id) => task_repo::list_by_project(&self.conn, id),
             Perspective::AllTags => Ok(Vec::new()),
@@ -480,7 +475,6 @@ impl AppState {
         task.due_date = parsed
             .due_date
             .or_else(|| parsed.recurrence.map(|_| Local::now().date_naive()));
-        task.flagged = parsed.flagged;
         task.recurrence = parsed.recurrence;
 
         if let Some(name) = parsed.project {
@@ -572,7 +566,6 @@ impl AppState {
                     .and_then(|pid| self.projects.iter().find(|p| p.id == pid))
                     .map(|p| p.name.clone()),
                 due_date: t.due_date,
-                flagged: t.flagged,
                 tags: t
                     .tags
                     .iter()
@@ -733,16 +726,6 @@ impl AppState {
                 task_repo::set_completed(&self.conn, task_id, false).map_err(|e| e.to_string())?;
                 Ok(format!("reopened \"{title}\""))
             }
-            ChatAction::FlagTask { task_id } => {
-                let title = self.task_title(task_id)?;
-                task_repo::set_flagged(&self.conn, task_id, true).map_err(|e| e.to_string())?;
-                Ok(format!("flagged \"{title}\""))
-            }
-            ChatAction::UnflagTask { task_id } => {
-                let title = self.task_title(task_id)?;
-                task_repo::set_flagged(&self.conn, task_id, false).map_err(|e| e.to_string())?;
-                Ok(format!("unflagged \"{title}\""))
-            }
             ChatAction::MoveToProject { task_id, project } => {
                 let title = self.task_title(task_id)?;
                 let project_id = self
@@ -796,7 +779,6 @@ impl AppState {
                 task.due_date = parsed
                     .due_date
                     .or_else(|| parsed.recurrence.map(|_| Local::now().date_naive()));
-                task.flagged = parsed.flagged;
                 task.recurrence = parsed.recurrence;
                 if let Some(name) = &parsed.project {
                     task.project_id = self
@@ -1198,7 +1180,6 @@ impl AppState {
             project_id: buf.project_id,
             due_date: buf.due_date,
             defer_date: buf.defer_date,
-            flagged: buf.flagged,
             completed: buf.completed,
             completed_at: buf.completed_at,
             created_at: buf.created_at,
@@ -1274,7 +1255,6 @@ impl AppState {
         next.notes = task.notes;
         next.project_id = task.project_id;
         next.due_date = Some(recurrence.next_due_date(completed_on));
-        next.flagged = task.flagged;
         next.estimated_minutes = task.estimated_minutes;
         next.tags = task.tags;
         next.recurrence = Some(recurrence);
@@ -1282,13 +1262,6 @@ impl AppState {
         if let Err(e) = task_repo::create(&self.conn, &next) {
             self.error_message = Some(e.to_string());
         }
-    }
-
-    pub fn toggle_flag(&mut self, id: TaskId, flagged: bool) {
-        if let Err(e) = task_repo::set_flagged(&self.conn, id, flagged) {
-            self.error_message = Some(e.to_string());
-        }
-        self.refresh_visible_tasks();
     }
 
     pub fn create_project(&mut self) {
@@ -1510,7 +1483,6 @@ mod tests {
             due_date: Some(due),
             tags: vec![],
             project: Some("kitchen remodel".to_string()),
-            flagged: false,
             recurrence: None,
         });
 
@@ -1536,7 +1508,6 @@ mod tests {
             due_date: None,
             tags: vec![],
             project: None,
-            flagged: false,
             recurrence: None,
         });
 
@@ -1553,7 +1524,6 @@ mod tests {
             due_date: None,
             tags: vec![],
             project: Some("Nonexistent Project".to_string()),
-            flagged: false,
             recurrence: None,
         });
 
@@ -1575,7 +1545,6 @@ mod tests {
             due_date: None,
             tags: vec!["shopping".to_string()],
             project: None,
-            flagged: true,
             recurrence: None,
         });
 
@@ -1586,7 +1555,6 @@ mod tests {
         assert_eq!(actual.len(), 2);
         assert!(actual.contains(&shopping_id));
         assert!(actual.contains(&errand_id));
-        assert!(state.visible_tasks[0].flagged);
     }
 
     #[test]
@@ -1599,7 +1567,6 @@ mod tests {
             due_date: None,
             tags: vec![],
             project: None,
-            flagged: false,
             recurrence: Some(Recurrence {
                 interval: 1,
                 unit: RecurrenceUnit::Days,
@@ -1873,7 +1840,6 @@ mod tests {
                     due_date: Some(due),
                     tags: vec![],
                     project: Some("Habits".to_string()),
-                    flagged: false,
                     recurrence: Some(Recurrence {
                         interval: 1,
                         unit: RecurrenceUnit::Weeks,
@@ -1915,7 +1881,6 @@ mod tests {
                     due_date: None,
                     tags: vec![],
                     project: Some("Nonexistent".to_string()),
-                    flagged: false,
                     recurrence: None,
                 },
             }],
@@ -2396,7 +2361,6 @@ mod tests {
                 Perspective::Inbox,
                 Perspective::Today,
                 Perspective::Overdue,
-                Perspective::Flagged,
                 Perspective::Completed,
                 Perspective::Project(project_id),
                 Perspective::AllTags,
@@ -2449,8 +2413,8 @@ mod tests {
 
         state.quick_entry_buffer = "renew passport".to_string();
         state.quick_capture_submit();
-        state.toggle_flag(state.visible_tasks[1].id, true);
-        let flagged_task = state.visible_tasks[1].id;
+        let completed_task = state.visible_tasks[1].id;
+        state.toggle_complete(completed_task, true);
 
         state.focus_sidebar(0); // Inbox
         assert_eq!(state.highlighted_task, Some(inbox_task));
@@ -2461,9 +2425,9 @@ mod tests {
         state.move_sidebar_highlight(1); // Overdue (empty)
         assert!(state.highlighted_task.is_none());
 
-        state.move_sidebar_highlight(1); // Flagged
-        assert_eq!(state.perspective, Perspective::Flagged);
-        assert_eq!(state.highlighted_task, Some(flagged_task));
+        state.move_sidebar_highlight(1); // Completed
+        assert_eq!(state.perspective, Perspective::Completed);
+        assert_eq!(state.highlighted_task, Some(completed_task));
     }
 
     #[test]

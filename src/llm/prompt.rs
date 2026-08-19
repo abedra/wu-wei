@@ -47,9 +47,8 @@ pub fn system_prompt(context: &PromptContext) -> String {
          against the lookup above, else null; tags as short \
          lowercase single words (from hashtags or clearly implied topics), else an empty \
          list; a project name copied exactly from the existing projects list if one is \
-         clearly implied, else null — never invent a new project name; flagged as true \
-         only if the text signals urgency or importance (e.g. \"urgent\", \"asap\", \
-         \"important\"), else false; recurrence as {{interval, unit}} if the text implies \
+         clearly implied, else null — never invent a new project name; recurrence as \
+         {{interval, unit}} if the text implies \
          the task repeats — \"daily\"/\"every day\" -> {{interval:1, unit:\"days\"}}, \
          \"weekly\" -> {{interval:1, unit:\"weeks\"}}, \"every 3 days\" -> {{interval:3, \
          unit:\"days\"}}, \"monthly\" -> {{interval:1, unit:\"months\"}} — else null.",
@@ -92,10 +91,9 @@ pub fn response_schema() -> Value {
             "due_date": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
             "tags": { "type": "array", "items": { "type": "string" } },
             "project": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
-            "flagged": { "type": "boolean" },
             "recurrence": recurrence_schema()
         },
-        "required": ["title", "due_date", "tags", "project", "flagged", "recurrence"],
+        "required": ["title", "due_date", "tags", "project", "recurrence"],
         "additionalProperties": false
     })
 }
@@ -145,7 +143,6 @@ pub struct RawExtraction {
     pub due_date: Option<String>,
     pub tags: Vec<String>,
     pub project: Option<String>,
-    pub flagged: bool,
     pub recurrence: Option<RawRecurrence>,
 }
 
@@ -160,7 +157,6 @@ impl RawExtraction {
             due_date: parse_optional_due_date(self.due_date)?,
             tags: self.tags,
             project: self.project.filter(|p| !p.trim().is_empty()),
-            flagged: self.flagged,
             recurrence: parse_optional_recurrence(self.recurrence)?,
         })
     }
@@ -191,7 +187,6 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
                     "title": t.title,
                     "project": t.project,
                     "due_date": t.due_date.map(|d| d.format("%Y-%m-%d").to_string()),
-                    "flagged": t.flagged,
                     "tags": t.tags,
                 })
             })
@@ -202,7 +197,8 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
     format!(
         "You are an assistant embedded in loa, a GTD-style task manager. The user gives you \
          commands about their tasks in natural language, e.g. \"roll all of my overdue tasks \
-         to today\" or \"flag the dentist task\". Today's date is {today} ({today_weekday}). \
+         to today\" or \"move the dentist task to Health\". Today's date is {today} \
+         ({today_weekday}). \
          For resolving relative or named-weekday dates (e.g. \"due Saturday\", \"next \
          Friday\"), here are the next 7 days: {weekdays} — use this lookup rather than \
          computing weekdays yourself; getting the day-of-week arithmetic wrong is a common \
@@ -225,8 +221,8 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
          clear_due_date (task_id), set_recurrence (task_id, recurrence — {{interval, unit}}; \
          makes an existing task repeat, or changes how often it already does), \
          clear_recurrence (task_id — makes an existing task stop repeating; it still keeps \
-         whatever due date it has), complete_task (task_id), reopen_task (task_id), flag_task \
-         (task_id), unflag_task (task_id), move_to_project (task_id, project — copied exactly \
+         whatever due date it has), complete_task (task_id), reopen_task (task_id), \
+         move_to_project (task_id, project — copied exactly \
          from the existing projects list, never invent one), move_to_inbox (task_id), add_tag \
          (task_id, tag — a new tag is fine, it doesn't need to already exist), remove_tag \
          (task_id, tag — copied exactly from the existing tags list; only removes it from this \
@@ -238,7 +234,7 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
          every task that had it, not just one), delete_task (task_id — permanently deletes the \
          task itself; only use this when the user clearly wants the task gone for good, not \
          just done or filed away — complete_task or move_to_inbox are usually what they mean), \
-         create_task (title, due_date, project, tags, flagged, recurrence — same fields and \
+         create_task (title, due_date, project, tags, recurrence — same fields and \
          rules as quick capture; title is required, everything else is optional; project must \
          match an existing project exactly or be null, never invent one; this is the only way \
          to add a brand new task — never try to create one by sending other actions against a \
@@ -282,7 +278,7 @@ pub fn chat_response_schema() -> Value {
                             "enum": [
                                 "set_due_date", "clear_due_date", "set_recurrence",
                                 "clear_recurrence", "complete_task", "reopen_task",
-                                "flag_task", "unflag_task", "move_to_project", "move_to_inbox",
+                                "move_to_project", "move_to_inbox",
                                 "add_tag", "remove_tag", "create_project", "delete_project",
                                 "delete_tag", "delete_task", "create_task"
                             ]
@@ -298,12 +294,11 @@ pub fn chat_response_schema() -> Value {
                                 { "type": "null" }
                             ]
                         },
-                        "flagged": { "anyOf": [{ "type": "boolean" }, { "type": "null" }] },
                         "recurrence": recurrence_schema()
                     },
                     "required": [
                         "type", "task_id", "due_date", "project", "tag", "title", "tags",
-                        "flagged", "recurrence"
+                        "recurrence"
                     ],
                     "additionalProperties": false
                 }
@@ -324,7 +319,6 @@ pub struct RawChatAction {
     pub tag: Option<String>,
     pub title: Option<String>,
     pub tags: Option<Vec<String>>,
-    pub flagged: Option<bool>,
     pub recurrence: Option<RawRecurrence>,
 }
 
@@ -501,12 +495,6 @@ impl RawChatAction {
             "reopen_task" => Ok(ChatAction::ReopenTask {
                 task_id: parse_required_task_id("reopen_task", self.task_id)?,
             }),
-            "flag_task" => Ok(ChatAction::FlagTask {
-                task_id: parse_required_task_id("flag_task", self.task_id)?,
-            }),
-            "unflag_task" => Ok(ChatAction::UnflagTask {
-                task_id: parse_required_task_id("unflag_task", self.task_id)?,
-            }),
             "move_to_project" => Ok(ChatAction::MoveToProject {
                 task_id: parse_required_task_id("move_to_project", self.task_id)?,
                 project: parse_required_project("move_to_project", self.project)?,
@@ -548,7 +536,6 @@ impl RawChatAction {
                         due_date: parse_optional_due_date(self.due_date)?,
                         tags: self.tags.unwrap_or_default(),
                         project: self.project.filter(|p| !p.trim().is_empty()),
-                        flagged: self.flagged.unwrap_or(false),
                         recurrence: parse_optional_recurrence(self.recurrence)?,
                     },
                 })
@@ -580,7 +567,6 @@ mod tests {
             due_date: due_date.map(str::to_string),
             tags: vec!["errand".to_string()],
             project: project.map(str::to_string),
-            flagged: true,
             recurrence: None,
         }
     }
@@ -597,7 +583,6 @@ mod tests {
         );
         assert_eq!(parsed.project, Some("Groceries".to_string()));
         assert_eq!(parsed.tags, vec!["errand".to_string()]);
-        assert!(parsed.flagged);
     }
 
     #[test]
@@ -673,7 +658,6 @@ mod tests {
             tag: None,
             title: None,
             tags: None,
-            flagged: None,
             recurrence: None,
         }
     }
@@ -687,7 +671,6 @@ mod tests {
             tag: None,
             title: None,
             tags: None,
-            flagged: None,
             recurrence: None,
         }
     }
@@ -805,11 +788,11 @@ mod tests {
         let id = TaskId::new();
         let raw = RawChatReply {
             reply: "Done.".to_string(),
-            actions: vec![chat_action("flag_task", &id.0.to_string())],
+            actions: vec![chat_action("complete_task", &id.0.to_string())],
         };
         let reply = raw.into_chat_reply(&[], &[]);
         assert_eq!(reply.reply, "Done.");
-        assert_eq!(reply.actions, vec![ChatAction::FlagTask { task_id: id }]);
+        assert_eq!(reply.actions, vec![ChatAction::CompleteTask { task_id: id }]);
         assert!(reply.parse_failures.is_empty());
     }
 
@@ -820,14 +803,14 @@ mod tests {
         broken.project = None; // missing the required field
         let raw = RawChatReply {
             reply: "Rolled the overdue task and made a new project.".to_string(),
-            actions: vec![chat_action("flag_task", &id.0.to_string()), broken],
+            actions: vec![chat_action("complete_task", &id.0.to_string()), broken],
         };
         let reply = raw.into_chat_reply(&[], &[]);
         assert_eq!(
             reply.reply,
             "Rolled the overdue task and made a new project."
         );
-        assert_eq!(reply.actions, vec![ChatAction::FlagTask { task_id: id }]);
+        assert_eq!(reply.actions, vec![ChatAction::CompleteTask { task_id: id }]);
         assert_eq!(reply.parse_failures.len(), 1);
         assert!(reply.parse_failures[0].contains("missing a project"));
     }
@@ -1025,7 +1008,6 @@ mod tests {
         raw.due_date = Some("2026-08-24".to_string());
         raw.project = Some("Habits".to_string());
         raw.tags = Some(vec!["finance".to_string()]);
-        raw.flagged = Some(true);
         raw.recurrence = Some(RawRecurrence {
             interval: 1,
             unit: "weeks".to_string(),
@@ -1039,7 +1021,6 @@ mod tests {
                     due_date: Some(NaiveDate::from_ymd_opt(2026, 8, 24).unwrap()),
                     tags: vec!["finance".to_string()],
                     project: Some("Habits".to_string()),
-                    flagged: true,
                     recurrence: Some(Recurrence {
                         interval: 1,
                         unit: RecurrenceUnit::Weeks,
@@ -1062,7 +1043,6 @@ mod tests {
                     due_date: None,
                     tags: Vec::new(),
                     project: None,
-                    flagged: false,
                     recurrence: None,
                 },
             }

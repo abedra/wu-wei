@@ -19,7 +19,6 @@ pub fn handle(ctx: &egui::Context, state: &mut AppState) {
     handle_task_navigation(ctx, state);
     handle_toggle_details(ctx, state);
     handle_perspective_switches(ctx, state);
-    handle_flag_toggle(ctx, state);
     handle_delete(ctx, state);
     handle_complete_toggle(ctx, state);
 }
@@ -28,7 +27,7 @@ pub fn handle(ctx: &egui::Context, state: &mut AppState) {
 /// below, or by clicking a row), Up/Down step through perspectives, switching
 /// live. Each step also places the keyboard inside that perspective's content
 /// immediately (`AppState::focus_sidebar`/`move_sidebar_highlight` highlight
-/// its first task) — Space/Enter/M/D/flag/delete all act on it right away, no
+/// its first task) — Space/Enter/M/D/delete all act on it right away, no
 /// extra step required. Tab still hands Up/Down themselves over to the
 /// content list, to move past that first item.
 fn handle_sidebar_navigation(ctx: &egui::Context, state: &mut AppState) {
@@ -70,13 +69,12 @@ fn handle_focus_sidebar(ctx: &egui::Context, state: &mut AppState) {
 }
 
 fn handle_perspective_switches(ctx: &egui::Context, state: &mut AppState) {
-    const PERSPECTIVE_KEYS: [(egui::Key, Perspective); 6] = [
+    const PERSPECTIVE_KEYS: [(egui::Key, Perspective); 5] = [
         (egui::Key::Num1, Perspective::Inbox),
         (egui::Key::Num2, Perspective::AllTags),
         (egui::Key::Num3, Perspective::Today),
-        (egui::Key::Num4, Perspective::Flagged),
-        (egui::Key::Num5, Perspective::Completed),
-        (egui::Key::Num6, Perspective::Overdue),
+        (egui::Key::Num4, Perspective::Completed),
+        (egui::Key::Num5, Perspective::Overdue),
     ];
     for (key, perspective) in PERSPECTIVE_KEYS {
         let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, key);
@@ -139,24 +137,6 @@ fn handle_new_project_popup(ctx: &egui::Context, state: &mut AppState) {
     if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
         state.open_new_project_popup();
         ctx.memory_mut(|m| m.request_focus(new_project::field_id()));
-    }
-}
-
-fn handle_flag_toggle(ctx: &egui::Context, state: &mut AppState) {
-    let shortcut = egui::KeyboardShortcut::new(
-        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-        egui::Key::L,
-    );
-    if !ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
-        return;
-    }
-    if state.any_picker_open() {
-        return;
-    }
-    if let Some(id) = state.highlighted_task
-        && let Some(task) = state.visible_tasks.iter().find(|t| t.id == id)
-    {
-        state.toggle_flag(id, !task.flagged);
     }
 }
 

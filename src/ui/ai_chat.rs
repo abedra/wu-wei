@@ -39,7 +39,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
             for turn in &state.chat_history {
                 let (label, color) = match turn.role {
                     ChatRole::User => ("You", crate::ui::theme::ACCENT),
-                    ChatRole::Assistant => ("AI", crate::ui::theme::FLAG),
+                    ChatRole::Assistant => ("AI", crate::ui::theme::WARM),
                 };
                 ui.label(egui::RichText::new(label).color(color).strong());
                 ui.add(egui::Label::new(&turn.content).wrap());
@@ -50,7 +50,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                     ui.spinner();
                     ui.label(
                         egui::RichText::new("AI")
-                            .color(crate::ui::theme::FLAG)
+                            .color(crate::ui::theme::WARM)
                             .strong(),
                     );
                     ui.weak("thinking…");

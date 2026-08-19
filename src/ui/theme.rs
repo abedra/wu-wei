@@ -1,10 +1,10 @@
 use eframe::egui;
 
-/// Primary accent: used for selection, flags, focused borders, and the
-/// sidebar heading.
+/// Primary accent: used for selection, focused borders, and the sidebar
+/// heading.
 pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(88, 166, 255);
-/// Warm color for flagged tasks.
-pub const FLAG: egui::Color32 = egui::Color32::from_rgb(240, 165, 55);
+/// Warm secondary accent: used for the AI chat panel and warning text.
+pub const WARM: egui::Color32 = egui::Color32::from_rgb(240, 165, 55);
 /// Warm/red color for overdue due dates.
 pub const OVERDUE: egui::Color32 = egui::Color32::from_rgb(235, 108, 108);
 
@@ -34,7 +34,7 @@ fn apply_to_style(style: &mut egui::Style) {
     visuals.extreme_bg_color = BASE;
     visuals.faint_bg_color = egui::Color32::from_rgb(30, 32, 38);
     visuals.error_fg_color = OVERDUE;
-    visuals.warn_fg_color = FLAG;
+    visuals.warn_fg_color = WARM;
 
     visuals.widgets.noninteractive.bg_fill = PANEL;
     visuals.widgets.noninteractive.weak_bg_fill = PANEL;
