@@ -47,6 +47,7 @@ fn label_for(state: &AppState, perspective: Perspective) -> String {
     match perspective {
         Perspective::Inbox => "Inbox".to_string(),
         Perspective::Today => "Today".to_string(),
+        Perspective::Overdue => "Overdue".to_string(),
         Perspective::Flagged => "Flagged".to_string(),
         Perspective::Completed => "Completed".to_string(),
         Perspective::AllProjects => "All Projects".to_string(),

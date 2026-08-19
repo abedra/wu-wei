@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed           INTEGER NOT NULL DEFAULT 0,
     completed_at        TEXT,
     created_at          TEXT NOT NULL,
-    estimated_minutes   INTEGER
+    estimated_minutes   INTEGER,
+    recurrence_interval INTEGER,
+    recurrence_unit     TEXT        -- 'days' | 'weeks' | 'months'; NULL = not recurring
 );
 
 CREATE TABLE IF NOT EXISTS tags (

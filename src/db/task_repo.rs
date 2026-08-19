@@ -5,13 +5,14 @@ use uuid::Uuid;
 use super::error::DbResult;
 use crate::domain::project::ProjectId;
 use crate::domain::tag::TagId;
-use crate::domain::task::{Task, TaskId};
+use crate::domain::task::{Recurrence, RecurrenceUnit, Task, TaskId};
 
 pub fn create(conn: &Connection, task: &Task) -> DbResult<()> {
     conn.execute(
         "INSERT INTO tasks (id, title, notes, project_id, due_date, defer_date,
-                             flagged, completed, completed_at, created_at, estimated_minutes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                             flagged, completed, completed_at, created_at, estimated_minutes,
+                             recurrence_interval, recurrence_unit)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             task.id.0.to_string(),
             task.title,
@@ -24,6 +25,8 @@ pub fn create(conn: &Connection, task: &Task) -> DbResult<()> {
             task.completed_at,
             task.created_at,
             task.estimated_minutes,
+            task.recurrence.map(|r| r.interval),
+            task.recurrence.map(|r| r.unit.as_str()),
         ],
     )?;
     set_tags_for_task(conn, task.id, &task.tags)?;
@@ -34,7 +37,8 @@ pub fn update(conn: &Connection, task: &Task) -> DbResult<()> {
     conn.execute(
         "UPDATE tasks SET title = ?2, notes = ?3, project_id = ?4, due_date = ?5,
                            defer_date = ?6, flagged = ?7, completed = ?8,
-                           completed_at = ?9, estimated_minutes = ?10
+                           completed_at = ?9, estimated_minutes = ?10,
+                           recurrence_interval = ?11, recurrence_unit = ?12
          WHERE id = ?1",
         params![
             task.id.0.to_string(),
@@ -47,6 +51,8 @@ pub fn update(conn: &Connection, task: &Task) -> DbResult<()> {
             task.completed,
             task.completed_at,
             task.estimated_minutes,
+            task.recurrence.map(|r| r.interval),
+            task.recurrence.map(|r| r.unit.as_str()),
         ],
     )?;
     set_tags_for_task(conn, task.id, &task.tags)?;
@@ -62,7 +68,8 @@ pub fn get(conn: &Connection, id: TaskId) -> DbResult<Option<Task>> {
     let task = conn
         .query_row(
             "SELECT id, title, notes, project_id, due_date, defer_date, flagged,
-                    completed, completed_at, created_at, estimated_minutes
+                    completed, completed_at, created_at, estimated_minutes,
+                    recurrence_interval, recurrence_unit
              FROM tasks WHERE id = ?1",
             params![id.0.to_string()],
             row_to_task,
@@ -98,7 +105,8 @@ pub fn list_by_project(conn: &Connection, project_id: ProjectId) -> DbResult<Vec
 pub fn list_by_tag(conn: &Connection, tag_id: TagId) -> DbResult<Vec<Task>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, t.notes, t.project_id, t.due_date, t.defer_date, t.flagged,
-                t.completed, t.completed_at, t.created_at, t.estimated_minutes
+                t.completed, t.completed_at, t.created_at, t.estimated_minutes,
+                t.recurrence_interval, t.recurrence_unit
          FROM tasks t
          JOIN task_tags tt ON tt.task_id = t.id
          WHERE tt.tag_id = ?1
@@ -115,6 +123,17 @@ pub fn list_today(conn: &Connection, today: NaiveDate) -> DbResult<Vec<Task>> {
     list_where(
         conn,
         "due_date IS NOT NULL AND due_date <= ?1 AND completed = 0",
+        params![today],
+        "due_date",
+    )
+}
+
+/// Strictly before `today` — tasks due today itself belong in `list_today`,
+/// not here.
+pub fn list_overdue(conn: &Connection, today: NaiveDate) -> DbResult<Vec<Task>> {
+    list_where(
+        conn,
+        "due_date IS NOT NULL AND due_date < ?1 AND completed = 0",
         params![today],
         "due_date",
     )
@@ -172,7 +191,8 @@ fn list_where(
 ) -> DbResult<Vec<Task>> {
     let sql = format!(
         "SELECT id, title, notes, project_id, due_date, defer_date, flagged,
-                completed, completed_at, created_at, estimated_minutes
+                completed, completed_at, created_at, estimated_minutes,
+                recurrence_interval, recurrence_unit
          FROM tasks WHERE {where_clause} ORDER BY {order_by}"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -186,6 +206,15 @@ fn list_where(
 fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     let id: String = row.get(0)?;
     let project_id: Option<String> = row.get(3)?;
+    let recurrence_interval: Option<u32> = row.get(11)?;
+    let recurrence_unit: Option<String> = row.get(12)?;
+    let recurrence = recurrence_interval
+        .zip(recurrence_unit)
+        .map(|(interval, unit)| Recurrence {
+            interval,
+            unit: RecurrenceUnit::parse(&unit)
+                .expect("recurrence_unit column always holds a value written by this module"),
+        });
     Ok(Task {
         id: TaskId(
             Uuid::parse_str(&id)
@@ -207,6 +236,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         created_at: row.get(9)?,
         estimated_minutes: row.get(10)?,
         tags: Vec::new(),
+        recurrence,
     })
 }
 
@@ -259,6 +289,7 @@ mod tests {
         let fetched = get(&conn, task.id).unwrap().unwrap();
         assert_eq!(fetched.title, "write tests");
         assert!(fetched.project_id.is_none());
+        assert!(fetched.recurrence.is_none());
 
         task.title = "write more tests".to_string();
         task.notes = "some notes".to_string();
@@ -320,13 +351,21 @@ mod tests {
         assert!(today_titles.contains(&"overdue"));
         assert!(!today_titles.contains(&"future"));
 
+        let overdue_list = list_overdue(&conn, today).unwrap();
+        assert_eq!(overdue_list.len(), 1);
+        assert_eq!(overdue_list[0].title, "overdue");
+
+        set_completed(&conn, overdue_task.id, true).unwrap();
+        let overdue_list = list_overdue(&conn, today).unwrap();
+        assert!(overdue_list.is_empty());
+
         set_completed(&conn, today_task.id, true).unwrap();
         let today_list = list_today(&conn, today).unwrap();
         assert!(!today_list.iter().any(|t| t.id == today_task.id));
 
         let completed = list_completed(&conn).unwrap();
-        assert_eq!(completed.len(), 1);
-        assert!(completed[0].completed_at.is_some());
+        assert_eq!(completed.len(), 2);
+        assert!(completed.iter().all(|t| t.completed_at.is_some()));
     }
 
     #[test]
@@ -356,5 +395,30 @@ mod tests {
         assert!(by_tag_b.is_empty());
         let by_tag_a = list_by_tag(&conn, tag_a.id).unwrap();
         assert_eq!(by_tag_a.len(), 1);
+    }
+
+    #[test]
+    fn recurrence_round_trips_through_create_get_and_update() {
+        let conn = db::open_in_memory().unwrap();
+        let mut task = Task::new_inbox("water plants");
+        task.recurrence = Some(Recurrence {
+            interval: 3,
+            unit: RecurrenceUnit::Days,
+        });
+        create(&conn, &task).unwrap();
+
+        let fetched = get(&conn, task.id).unwrap().unwrap();
+        assert_eq!(
+            fetched.recurrence,
+            Some(Recurrence {
+                interval: 3,
+                unit: RecurrenceUnit::Days,
+            })
+        );
+
+        task.recurrence = None;
+        update(&conn, &task).unwrap();
+        let fetched = get(&conn, task.id).unwrap().unwrap();
+        assert!(fetched.recurrence.is_none());
     }
 }

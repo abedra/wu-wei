@@ -7,6 +7,8 @@ use std::thread;
 
 use chrono::NaiveDate;
 
+use crate::domain::task::Recurrence;
+
 /// A task as extracted from free text by an LLM, before it's turned into a
 /// real [`crate::domain::task::Task`] (which needs project/tag IDs, not names).
 #[derive(Debug, Clone)]
@@ -16,6 +18,7 @@ pub struct ParsedTask {
     pub tags: Vec<String>,
     pub project: Option<String>,
     pub flagged: bool,
+    pub recurrence: Option<Recurrence>,
 }
 
 /// Context handed to the model so it can resolve relative dates and match an

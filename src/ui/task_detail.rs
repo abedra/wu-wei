@@ -2,6 +2,7 @@ use chrono::{Datelike, NaiveDate};
 use eframe::egui;
 use egui_extras::DatePickerButton;
 
+use crate::domain::task::{Recurrence, RecurrenceUnit};
 use crate::state::AppState;
 
 fn naive_to_jiff(d: NaiveDate) -> jiff::civil::Date {
@@ -12,6 +13,66 @@ fn naive_to_jiff(d: NaiveDate) -> jiff::civil::Date {
 fn jiff_to_naive(d: jiff::civil::Date) -> NaiveDate {
     NaiveDate::from_ymd_opt(d.year() as i32, d.month() as u32, d.day() as u32)
         .expect("jiff Date is always a valid calendar date")
+}
+
+/// A recurrence with no due date never shows up anywhere (Today, the list's
+/// Due column, ...), so enabling "Repeats every" also sets one — today — if
+/// the task doesn't already have one, rather than leaving it invisible until
+/// edited by hand.
+fn recurrence_field(
+    ui: &mut egui::Ui,
+    recurrence: &mut Option<Recurrence>,
+    due_date: &mut Option<NaiveDate>,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let mut repeats = recurrence.is_some();
+        if ui.checkbox(&mut repeats, "Repeats every").changed() {
+            *recurrence = if repeats {
+                if due_date.is_none() {
+                    *due_date = Some(chrono::Utc::now().date_naive());
+                }
+                Some(Recurrence {
+                    interval: 1,
+                    unit: RecurrenceUnit::Weeks,
+                })
+            } else {
+                None
+            };
+            changed = true;
+        }
+        if let Some(r) = recurrence {
+            let mut interval = r.interval;
+            if ui
+                .add(egui::DragValue::new(&mut interval).range(1..=999))
+                .changed()
+            {
+                r.interval = interval.max(1);
+                changed = true;
+            }
+            let label = match r.unit {
+                RecurrenceUnit::Days => "day(s)",
+                RecurrenceUnit::Weeks => "week(s)",
+                RecurrenceUnit::Months => "month(s)",
+            };
+            egui::ComboBox::from_id_salt("recurrence_unit")
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    for unit in RecurrenceUnit::ALL {
+                        let text = match unit {
+                            RecurrenceUnit::Days => "day(s)",
+                            RecurrenceUnit::Weeks => "week(s)",
+                            RecurrenceUnit::Months => "month(s)",
+                        };
+                        if ui.selectable_label(r.unit == unit, text).clicked() {
+                            r.unit = unit;
+                            changed = true;
+                        }
+                    }
+                });
+        }
+    });
+    changed
 }
 
 fn date_field(ui: &mut egui::Ui, label: &str, date: &mut Option<NaiveDate>) -> bool {
@@ -91,6 +152,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
 
         dirty |= date_field(ui, "Due date", &mut buf.due_date);
         dirty |= date_field(ui, "Defer date", &mut buf.defer_date);
+        dirty |= recurrence_field(ui, &mut buf.recurrence, &mut buf.due_date);
         dirty |= ui.checkbox(&mut buf.flagged, "Flagged").changed();
 
         let mut completed = buf.completed;

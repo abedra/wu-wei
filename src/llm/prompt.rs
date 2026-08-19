@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{ParsedTask, PromptContext};
+use crate::domain::task::{Recurrence, RecurrenceUnit};
 
 /// Shared instructions given to whichever provider is configured — kept
 /// provider-agnostic so both HTTP clients ask the model for exactly the same
@@ -16,14 +17,17 @@ pub fn system_prompt(context: &PromptContext) -> String {
     format!(
         "You turn a single line of quick-capture text into a structured task for a \
          GTD-style task manager. Today's date is {today}. Existing projects: {projects}. \
-         Extract: a short imperative title with any date/project/tag phrases removed; \
-         a due_date (YYYY-MM-DD) if the text implies one, resolving relative dates like \
-         \"tomorrow\" or \"next week\" against today, else null; tags as short lowercase \
-         single words (from hashtags or clearly implied topics), else an empty list; a \
-         project name copied exactly from the existing projects list if one is clearly \
-         implied, else null — never invent a new project name; flagged as true only if \
-         the text signals urgency or importance (e.g. \"urgent\", \"asap\", \"important\"), \
-         else false.",
+         Extract: a short imperative title with any date/project/tag/recurrence phrases \
+         removed; a due_date (YYYY-MM-DD) if the text implies one, resolving relative \
+         dates like \"tomorrow\" or \"next week\" against today, else null; tags as short \
+         lowercase single words (from hashtags or clearly implied topics), else an empty \
+         list; a project name copied exactly from the existing projects list if one is \
+         clearly implied, else null — never invent a new project name; flagged as true \
+         only if the text signals urgency or importance (e.g. \"urgent\", \"asap\", \
+         \"important\"), else false; recurrence as {{interval, unit}} if the text implies \
+         the task repeats — \"daily\"/\"every day\" -> {{interval:1, unit:\"days\"}}, \
+         \"weekly\" -> {{interval:1, unit:\"weeks\"}}, \"every 3 days\" -> {{interval:3, \
+         unit:\"days\"}}, \"monthly\" -> {{interval:1, unit:\"months\"}} — else null.",
         today = context.today.format("%Y-%m-%d"),
         projects = projects,
     )
@@ -41,11 +45,31 @@ pub fn response_schema() -> Value {
             "due_date": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
             "tags": { "type": "array", "items": { "type": "string" } },
             "project": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
-            "flagged": { "type": "boolean" }
+            "flagged": { "type": "boolean" },
+            "recurrence": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "interval": { "type": "integer" },
+                            "unit": { "type": "string", "enum": ["days", "weeks", "months"] }
+                        },
+                        "required": ["interval", "unit"],
+                        "additionalProperties": false
+                    },
+                    { "type": "null" }
+                ]
+            }
         },
-        "required": ["title", "due_date", "tags", "project", "flagged"],
+        "required": ["title", "due_date", "tags", "project", "flagged", "recurrence"],
         "additionalProperties": false
     })
+}
+
+#[derive(Deserialize)]
+pub struct RawRecurrence {
+    pub interval: u32,
+    pub unit: String,
 }
 
 /// The raw shape a provider's JSON reply is deserialized into, before
@@ -57,6 +81,7 @@ pub struct RawExtraction {
     pub tags: Vec<String>,
     pub project: Option<String>,
     pub flagged: bool,
+    pub recurrence: Option<RawRecurrence>,
 }
 
 impl RawExtraction {
@@ -72,12 +97,28 @@ impl RawExtraction {
             ),
             _ => None,
         };
+        let recurrence = match self.recurrence {
+            Some(r) => {
+                if r.interval == 0 {
+                    return Err("model returned a recurrence interval of 0".to_string());
+                }
+                let unit = RecurrenceUnit::parse(&r.unit).ok_or_else(|| {
+                    format!("model returned an unknown recurrence unit {:?}", r.unit)
+                })?;
+                Some(Recurrence {
+                    interval: r.interval,
+                    unit,
+                })
+            }
+            None => None,
+        };
         Ok(ParsedTask {
             title,
             due_date,
             tags: self.tags,
             project: self.project.filter(|p| !p.trim().is_empty()),
             flagged: self.flagged,
+            recurrence,
         })
     }
 }
@@ -93,6 +134,7 @@ mod tests {
             tags: vec!["errand".to_string()],
             project: project.map(str::to_string),
             flagged: true,
+            recurrence: None,
         }
     }
 
@@ -134,5 +176,44 @@ mod tests {
             .unwrap();
         assert_eq!(parsed.due_date, None);
         assert_eq!(parsed.project, None);
+    }
+
+    #[test]
+    fn parses_a_recurrence() {
+        let mut raw = extraction("inbox zero", None, None);
+        raw.recurrence = Some(RawRecurrence {
+            interval: 1,
+            unit: "days".to_string(),
+        });
+        let parsed = raw.into_parsed_task().unwrap();
+        assert_eq!(
+            parsed.recurrence,
+            Some(Recurrence {
+                interval: 1,
+                unit: RecurrenceUnit::Days,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_zero_recurrence_interval() {
+        let mut raw = extraction("inbox zero", None, None);
+        raw.recurrence = Some(RawRecurrence {
+            interval: 0,
+            unit: "days".to_string(),
+        });
+        let err = raw.into_parsed_task().unwrap_err();
+        assert!(err.contains("interval of 0"));
+    }
+
+    #[test]
+    fn rejects_an_unknown_recurrence_unit() {
+        let mut raw = extraction("inbox zero", None, None);
+        raw.recurrence = Some(RawRecurrence {
+            interval: 1,
+            unit: "fortnights".to_string(),
+        });
+        let err = raw.into_parsed_task().unwrap_err();
+        assert!(err.contains("unknown recurrence unit"));
     }
 }

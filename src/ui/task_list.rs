@@ -87,7 +87,12 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                     }
                 });
                 row.col(|ui| {
-                    let mut text = egui::RichText::new(&title);
+                    let title = if task.recurrence.is_some() {
+                        format!("\u{21bb} {title}")
+                    } else {
+                        title
+                    };
+                    let mut text = egui::RichText::new(title);
                     if completed {
                         text = text.strikethrough().weak();
                     }

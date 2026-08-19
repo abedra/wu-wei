@@ -7,13 +7,14 @@ use crate::db::error::DbResult;
 use crate::db::{project_repo, tag_repo, task_repo};
 use crate::domain::project::{Project, ProjectId, ProjectKind, ProjectStatus};
 use crate::domain::tag::{Tag, TagId};
-use crate::domain::task::{Task, TaskId};
+use crate::domain::task::{Recurrence, Task, TaskId};
 use crate::llm::{self, LlmConfig, ParsedTask, PromptContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Perspective {
     Inbox,
     Today,
+    Overdue,
     Flagged,
     Completed,
     AllProjects,
@@ -102,6 +103,7 @@ pub struct TaskEditBuffer {
     pub estimated_minutes: Option<i64>,
     pub tag_names: Vec<String>,
     pub new_tag_input: String,
+    pub recurrence: Option<Recurrence>,
 }
 
 impl TaskEditBuffer {
@@ -130,6 +132,7 @@ impl TaskEditBuffer {
             estimated_minutes: task.estimated_minutes,
             tag_names,
             new_tag_input: String::new(),
+            recurrence: task.recurrence,
         }
     }
 }
@@ -277,6 +280,7 @@ impl AppState {
         let mut entries = vec![
             Perspective::Inbox,
             Perspective::Today,
+            Perspective::Overdue,
             Perspective::Flagged,
             Perspective::Completed,
             Perspective::AllProjects,
@@ -334,6 +338,7 @@ impl AppState {
         let result = match self.perspective {
             Perspective::Inbox => task_repo::list_inbox(&self.conn),
             Perspective::Today => task_repo::list_today(&self.conn, today),
+            Perspective::Overdue => task_repo::list_overdue(&self.conn, today),
             Perspective::Flagged => task_repo::list_flagged(&self.conn),
             Perspective::Completed => task_repo::list_completed(&self.conn),
             Perspective::AllProjects => Ok(Vec::new()),
@@ -446,8 +451,14 @@ impl AppState {
     /// tells the model not to invent names) and gets-or-creates each tag.
     fn apply_parsed_task(&mut self, parsed: ParsedTask) {
         let mut task = Task::new_inbox(parsed.title);
-        task.due_date = parsed.due_date;
+        // A recurring task with no explicit date still needs one to show up
+        // anywhere (Today, the list's Due column, ...), so default it to
+        // today rather than leaving it invisible until edited by hand.
+        task.due_date = parsed
+            .due_date
+            .or_else(|| parsed.recurrence.map(|_| Utc::now().date_naive()));
         task.flagged = parsed.flagged;
+        task.recurrence = parsed.recurrence;
 
         if let Some(name) = parsed.project {
             task.project_id = self
@@ -794,6 +805,7 @@ impl AppState {
             created_at: buf.created_at,
             estimated_minutes: buf.estimated_minutes,
             tags: tag_ids,
+            recurrence: buf.recurrence,
         };
         if let Err(e) = task_repo::update(&self.conn, &task) {
             self.error_message = Some(e.to_string());
@@ -824,12 +836,52 @@ impl AppState {
     pub fn toggle_complete(&mut self, id: TaskId, completed: bool) {
         if let Err(e) = task_repo::set_completed(&self.conn, id, completed) {
             self.error_message = Some(e.to_string());
+            return;
+        }
+        if completed {
+            self.spawn_next_occurrence(id);
         }
         self.refresh_visible_tasks();
         if let Some(buf) = &self.task_edit_buffer
             && buf.id == id
         {
             self.select_task(id);
+        }
+    }
+
+    /// If the just-completed task repeats, creates its next occurrence: a
+    /// fresh task carrying over title/notes/project/tags/recurrence, due on
+    /// `recurrence.next_due_date` measured from today (the completion date —
+    /// "repeat after completion" semantics). The completed task itself is
+    /// left as-is, so it stays visible in Completed history.
+    fn spawn_next_occurrence(&mut self, completed_id: TaskId) {
+        let task = match task_repo::get(&self.conn, completed_id) {
+            Ok(Some(t)) => t,
+            Ok(None) => return,
+            Err(e) => {
+                self.error_message = Some(e.to_string());
+                return;
+            }
+        };
+        let Some(recurrence) = task.recurrence else {
+            return;
+        };
+        let completed_on = task
+            .completed_at
+            .map(|dt| dt.date_naive())
+            .unwrap_or_else(|| Utc::now().date_naive());
+
+        let mut next = Task::new_inbox(task.title);
+        next.notes = task.notes;
+        next.project_id = task.project_id;
+        next.due_date = Some(recurrence.next_due_date(completed_on));
+        next.flagged = task.flagged;
+        next.estimated_minutes = task.estimated_minutes;
+        next.tags = task.tags;
+        next.recurrence = Some(recurrence);
+
+        if let Err(e) = task_repo::create(&self.conn, &next) {
+            self.error_message = Some(e.to_string());
         }
     }
 
@@ -949,6 +1001,30 @@ mod tests {
     }
 
     #[test]
+    fn overdue_perspective_shows_only_strictly_past_due_tasks() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        let today = Utc::now().date_naive();
+
+        state.quick_entry_buffer = "overdue item".to_string();
+        state.quick_capture_submit();
+        let overdue_id = state.visible_tasks[0].id;
+        state.select_task(overdue_id);
+        state.task_edit_buffer.as_mut().unwrap().due_date = Some(today - Duration::days(1));
+        state.save_task_edits();
+
+        state.quick_entry_buffer = "due today item".to_string();
+        state.quick_capture_submit();
+        let today_id = state.visible_tasks.last().unwrap().id;
+        state.select_task(today_id);
+        state.task_edit_buffer.as_mut().unwrap().due_date = Some(today);
+        state.save_task_edits();
+
+        state.set_perspective(Perspective::Overdue);
+        assert_eq!(state.visible_tasks.len(), 1);
+        assert_eq!(state.visible_tasks[0].id, overdue_id);
+    }
+
+    #[test]
     fn quick_capture_popup_opens_submits_and_closes() {
         let mut state = AppState::new(crate::db::open_in_memory().unwrap());
         assert!(!state.quick_capture_open);
@@ -1022,6 +1098,7 @@ mod tests {
             tags: vec![],
             project: Some("kitchen remodel".to_string()),
             flagged: false,
+            recurrence: None,
         });
 
         // Perspective is still Inbox, so the project-filed task shouldn't show here.
@@ -1047,6 +1124,7 @@ mod tests {
             tags: vec![],
             project: None,
             flagged: false,
+            recurrence: None,
         });
 
         assert_eq!(state.visible_tasks.len(), 1);
@@ -1063,6 +1141,7 @@ mod tests {
             tags: vec![],
             project: Some("Nonexistent Project".to_string()),
             flagged: false,
+            recurrence: None,
         });
 
         assert!(state.projects.is_empty());
@@ -1084,6 +1163,7 @@ mod tests {
             tags: vec!["shopping".to_string()],
             project: None,
             flagged: true,
+            recurrence: None,
         });
 
         assert_eq!(state.tags.len(), 2);
@@ -1094,6 +1174,37 @@ mod tests {
         assert!(actual.contains(&shopping_id));
         assert!(actual.contains(&errand_id));
         assert!(state.visible_tasks[0].flagged);
+    }
+
+    #[test]
+    fn apply_parsed_task_defaults_a_due_date_when_recurring_without_one() {
+        use crate::domain::task::RecurrenceUnit;
+
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.apply_parsed_task(ParsedTask {
+            title: "inbox zero".to_string(),
+            due_date: None,
+            tags: vec![],
+            project: None,
+            flagged: false,
+            recurrence: Some(Recurrence {
+                interval: 1,
+                unit: RecurrenceUnit::Days,
+            }),
+        });
+
+        assert_eq!(state.visible_tasks.len(), 1);
+        assert_eq!(
+            state.visible_tasks[0].due_date,
+            Some(Utc::now().date_naive())
+        );
+        assert_eq!(
+            state.visible_tasks[0].recurrence,
+            Some(Recurrence {
+                interval: 1,
+                unit: RecurrenceUnit::Days,
+            })
+        );
     }
 
     #[test]
@@ -1248,6 +1359,7 @@ mod tests {
             vec![
                 Perspective::Inbox,
                 Perspective::Today,
+                Perspective::Overdue,
                 Perspective::Flagged,
                 Perspective::Completed,
                 Perspective::AllProjects,
@@ -1309,6 +1421,9 @@ mod tests {
         assert_eq!(state.highlighted_task, Some(inbox_task));
 
         state.move_sidebar_highlight(1); // Today (empty)
+        assert!(state.highlighted_task.is_none());
+
+        state.move_sidebar_highlight(1); // Overdue (empty)
         assert!(state.highlighted_task.is_none());
 
         state.move_sidebar_highlight(1); // Flagged
@@ -1385,5 +1500,56 @@ mod tests {
 
         state.delete_task(task_id);
         assert!(!state.detail_panel_open);
+    }
+
+    #[test]
+    fn completing_a_recurring_task_spawns_its_next_occurrence() {
+        use crate::domain::task::RecurrenceUnit;
+
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "water plants".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+
+        state.select_task(task_id);
+        state.task_edit_buffer.as_mut().unwrap().recurrence = Some(Recurrence {
+            interval: 3,
+            unit: RecurrenceUnit::Days,
+        });
+        state.save_task_edits();
+
+        state.toggle_complete(task_id, true);
+
+        let all = task_repo::list_all(&state.conn).unwrap();
+        assert_eq!(all.len(), 2);
+
+        let original = all.iter().find(|t| t.id == task_id).unwrap();
+        assert!(original.completed);
+
+        let next = all.iter().find(|t| t.id != task_id).unwrap();
+        assert!(!next.completed);
+        assert_eq!(next.title, "water plants");
+        assert_eq!(
+            next.recurrence,
+            Some(Recurrence {
+                interval: 3,
+                unit: RecurrenceUnit::Days,
+            })
+        );
+        let expected_due = original.completed_at.unwrap().date_naive() + chrono::Duration::days(3);
+        assert_eq!(next.due_date, Some(expected_due));
+    }
+
+    #[test]
+    fn completing_a_non_recurring_task_spawns_nothing() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "one-off".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+
+        state.toggle_complete(task_id, true);
+
+        let all = task_repo::list_all(&state.conn).unwrap();
+        assert_eq!(all.len(), 1);
     }
 }
