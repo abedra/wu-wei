@@ -4,9 +4,8 @@ use chrono::{Datelike, Duration, Local, NaiveDate, Utc, Weekday};
 use rusqlite::Connection;
 
 use crate::db::error::DbResult;
-use crate::db::{project_repo, tag_repo, task_repo};
+use crate::db::{project_repo, task_repo};
 use crate::domain::project::{Project, ProjectId, ProjectKind, ProjectStatus};
-use crate::domain::tag::{Tag, TagId};
 use crate::domain::task::{Recurrence, RecurrenceUnit, Task, TaskId};
 use crate::llm::{
     self, ChatAction, ChatContext, ChatReply, ChatRole, ChatTaskSummary, ChatTurn, LlmConfig,
@@ -20,8 +19,6 @@ pub enum Perspective {
     Overdue,
     Completed,
     Project(ProjectId),
-    AllTags,
-    Tag(TagId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +26,6 @@ pub enum Selection {
     None,
     Task(TaskId),
     Project(ProjectId),
-    Tag(TagId),
 }
 
 /// A small keyboard-driven picker for reassigning a task's project.
@@ -101,23 +97,11 @@ pub struct TaskEditBuffer {
     pub completed_at: Option<chrono::DateTime<Utc>>,
     pub created_at: chrono::DateTime<Utc>,
     pub estimated_minutes: Option<i64>,
-    pub tag_names: Vec<String>,
-    pub new_tag_input: String,
     pub recurrence: Option<Recurrence>,
 }
 
 impl TaskEditBuffer {
-    fn from_task(task: &Task, all_tags: &[Tag]) -> Self {
-        let tag_names = task
-            .tags
-            .iter()
-            .filter_map(|id| {
-                all_tags
-                    .iter()
-                    .find(|t| t.id == *id)
-                    .map(|t| t.name.clone())
-            })
-            .collect();
+    fn from_task(task: &Task) -> Self {
         TaskEditBuffer {
             id: task.id,
             title: task.title.clone(),
@@ -129,8 +113,6 @@ impl TaskEditBuffer {
             completed_at: task.completed_at,
             created_at: task.created_at,
             estimated_minutes: task.estimated_minutes,
-            tag_names,
-            new_tag_input: String::new(),
             recurrence: task.recurrence,
         }
     }
@@ -156,24 +138,9 @@ impl ProjectEditBuffer {
     }
 }
 
-pub struct TagEditBuffer {
-    pub id: TagId,
-    pub name: String,
-}
-
-impl TagEditBuffer {
-    fn from_tag(tag: &Tag) -> Self {
-        TagEditBuffer {
-            id: tag.id,
-            name: tag.name.clone(),
-        }
-    }
-}
-
 pub struct AppState {
     pub conn: Connection,
     pub projects: Vec<Project>,
-    pub tags: Vec<Tag>,
     pub visible_tasks: Vec<Task>,
     pub perspective: Perspective,
     pub selection: Selection,
@@ -186,7 +153,6 @@ pub struct AppState {
     pub highlighted_task: Option<TaskId>,
     pub task_edit_buffer: Option<TaskEditBuffer>,
     pub project_edit_buffer: Option<ProjectEditBuffer>,
-    pub tag_edit_buffer: Option<TagEditBuffer>,
     pub quick_entry_buffer: String,
     /// Whether the quick-capture popup is open (toggled by Cmd+N). It's a
     /// floating window rather than a permanent panel, so it never sits in the
@@ -196,7 +162,6 @@ pub struct AppState {
     /// floating-window shape as `quick_capture_open`.
     pub new_project_popup_open: bool,
     pub new_project_name: String,
-    pub new_tag_name: String,
     pub project_picker: Option<ProjectPickerState>,
     pub due_date_picker: Option<DueDatePickerState>,
     /// Whether keyboard control is currently on the sidebar (see
@@ -238,19 +203,16 @@ impl AppState {
         let mut state = AppState {
             conn,
             projects: Vec::new(),
-            tags: Vec::new(),
             visible_tasks: Vec::new(),
             perspective: Perspective::Inbox,
             selection: Selection::None,
             highlighted_task: None,
             task_edit_buffer: None,
             project_edit_buffer: None,
-            tag_edit_buffer: None,
             quick_entry_buffer: String::new(),
             quick_capture_open: false,
             new_project_popup_open: false,
             new_project_name: String::new(),
-            new_tag_name: String::new(),
             project_picker: None,
             due_date_picker: None,
             sidebar_focused: false,
@@ -266,7 +228,6 @@ impl AppState {
             chat_focus_requested: false,
         };
         state.refresh_projects();
-        state.refresh_tags();
         state.refresh_visible_tasks();
         state
     }
@@ -285,7 +246,6 @@ impl AppState {
         self.selection = Selection::None;
         self.task_edit_buffer = None;
         self.project_edit_buffer = None;
-        self.tag_edit_buffer = None;
         self.detail_panel_open = false;
     }
 
@@ -306,8 +266,6 @@ impl AppState {
             Perspective::Completed,
         ];
         entries.extend(self.projects.iter().map(|p| Perspective::Project(p.id)));
-        entries.push(Perspective::AllTags);
-        entries.extend(self.tags.iter().map(|t| Perspective::Tag(t.id)));
         entries
     }
 
@@ -361,8 +319,6 @@ impl AppState {
             Perspective::Overdue => task_repo::list_overdue(&self.conn, today),
             Perspective::Completed => task_repo::list_completed(&self.conn),
             Perspective::Project(id) => task_repo::list_by_project(&self.conn, id),
-            Perspective::AllTags => Ok(Vec::new()),
-            Perspective::Tag(id) => task_repo::list_by_tag(&self.conn, id),
         };
         self.visible_tasks = self.unwrap_or_report(result, Vec::new());
         if let Some(id) = self.highlighted_task
@@ -375,11 +331,6 @@ impl AppState {
     pub fn refresh_projects(&mut self) {
         let result = project_repo::list_all(&self.conn);
         self.projects = self.unwrap_or_report(result, Vec::new());
-    }
-
-    pub fn refresh_tags(&mut self) {
-        let result = tag_repo::list_all(&self.conn);
-        self.tags = self.unwrap_or_report(result, Vec::new());
     }
 
     pub fn open_quick_capture(&mut self) {
@@ -399,10 +350,8 @@ impl AppState {
             return;
         }
         let mut task = Task::new_inbox(title);
-        match self.perspective {
-            Perspective::Project(id) => task.project_id = Some(id),
-            Perspective::Tag(id) => task.tags = vec![id],
-            _ => {}
+        if let Perspective::Project(id) = self.perspective {
+            task.project_id = Some(id);
         }
         if let Err(e) = task_repo::create(&self.conn, &task) {
             self.error_message = Some(e.to_string());
@@ -466,7 +415,7 @@ impl AppState {
 
     /// Turns an LLM-parsed capture into a real task: matches `project` by
     /// name against known projects (never creates one — the prompt already
-    /// tells the model not to invent names) and gets-or-creates each tag.
+    /// tells the model not to invent names).
     fn apply_parsed_task(&mut self, parsed: ParsedTask) {
         let mut task = Task::new_inbox(parsed.title);
         // A recurring task with no explicit date still needs one to show up
@@ -487,36 +436,13 @@ impl AppState {
             task.project_id = Some(id);
         }
 
-        let mut tag_ids = self.resolve_or_create_tag_ids(&parsed.tags);
-        if let Perspective::Tag(id) = self.perspective
-            && !tag_ids.contains(&id)
-        {
-            tag_ids.push(id);
-        }
-        task.tags = tag_ids;
-
         if let Err(e) = task_repo::create(&self.conn, &task) {
             self.error_message = Some(e.to_string());
             return;
         }
-        self.refresh_tags();
         self.quick_entry_buffer.clear();
         self.quick_capture_open = false;
         self.refresh_visible_tasks();
-    }
-
-    /// Gets-or-creates a tag id for each name, reporting (but not aborting
-    /// on) any individual lookup failure — shared by quick capture and the
-    /// AI chat's `create_task`/`add_tag` handling.
-    fn resolve_or_create_tag_ids(&mut self, names: &[String]) -> Vec<TagId> {
-        let mut tag_ids = Vec::new();
-        for name in names {
-            match tag_repo::get_or_create_by_name(&self.conn, name) {
-                Ok(tag) => tag_ids.push(tag.id),
-                Err(e) => self.error_message = Some(e.to_string()),
-            }
-        }
-        tag_ids
     }
 
     /// Sends the current chat input as a new user turn to the configured
@@ -566,19 +492,12 @@ impl AppState {
                     .and_then(|pid| self.projects.iter().find(|p| p.id == pid))
                     .map(|p| p.name.clone()),
                 due_date: t.due_date,
-                tags: t
-                    .tags
-                    .iter()
-                    .filter_map(|tid| self.tags.iter().find(|tag| tag.id == *tid))
-                    .map(|tag| tag.name.clone())
-                    .collect(),
             })
             .collect();
         ChatContext {
             today: Local::now().date_naive(),
             tasks,
             project_names: self.projects.iter().map(|p| p.name.clone()).collect(),
-            tag_names: self.tags.iter().map(|t| t.name.clone()).collect(),
         }
     }
 
@@ -615,7 +534,7 @@ impl AppState {
 
     /// Executes every action the model requested, appends its reply (plus a
     /// short note about any actions that failed) to the transcript, and
-    /// refreshes the cached task/tag/project lists once for the whole batch
+    /// refreshes the cached task/project lists once for the whole batch
     /// rather than after each individual action.
     fn apply_chat_reply(&mut self, reply: ChatReply) {
         let mut done = Vec::new();
@@ -655,7 +574,6 @@ impl AppState {
             content,
         });
         self.refresh_visible_tasks();
-        self.refresh_tags();
         self.refresh_projects();
     }
 
@@ -743,35 +661,6 @@ impl AppState {
                 task_repo::set_project(&self.conn, task_id, None).map_err(|e| e.to_string())?;
                 Ok(format!("moved \"{title}\" to Inbox"))
             }
-            ChatAction::AddTag { task_id, tag } => {
-                let task = task_repo::get(&self.conn, task_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "no task with that id".to_string())?;
-                let tag_record =
-                    tag_repo::get_or_create_by_name(&self.conn, &tag).map_err(|e| e.to_string())?;
-                let mut tag_ids = task.tags;
-                if !tag_ids.contains(&tag_record.id) {
-                    tag_ids.push(tag_record.id);
-                }
-                task_repo::set_tags_for_task(&self.conn, task_id, &tag_ids)
-                    .map_err(|e| e.to_string())?;
-                Ok(format!("tagged \"{}\" with {tag}", task.title))
-            }
-            ChatAction::RemoveTag { task_id, tag } => {
-                let task = task_repo::get(&self.conn, task_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "no task with that id".to_string())?;
-                let tag_id = self
-                    .tags
-                    .iter()
-                    .find(|t| t.name.eq_ignore_ascii_case(&tag))
-                    .map(|t| t.id)
-                    .ok_or_else(|| format!("no tag named {tag:?}"))?;
-                let tag_ids: Vec<_> = task.tags.into_iter().filter(|id| *id != tag_id).collect();
-                task_repo::set_tags_for_task(&self.conn, task_id, &tag_ids)
-                    .map_err(|e| e.to_string())?;
-                Ok(format!("removed {tag} from \"{}\"", task.title))
-            }
             ChatAction::CreateTask { task: parsed } => {
                 let mut task = Task::new_inbox(parsed.title.clone());
                 // Same defaulting as quick capture: a recurring task with no
@@ -787,10 +676,7 @@ impl AppState {
                         .find(|p| p.name.eq_ignore_ascii_case(name))
                         .map(|p| p.id);
                 }
-                task.tags = self.resolve_or_create_tag_ids(&parsed.tags);
-
                 task_repo::create(&self.conn, &task).map_err(|e| e.to_string())?;
-                self.refresh_tags();
 
                 let mut description = format!("created task \"{}\"", task.title);
                 if let Some(project_name) = task
@@ -832,16 +718,6 @@ impl AppState {
                 self.delete_project_checked(project_id)?;
                 Ok(format!("deleted project \"{project}\""))
             }
-            ChatAction::DeleteTag { tag } => {
-                let tag_id = self
-                    .tags
-                    .iter()
-                    .find(|t| t.name.eq_ignore_ascii_case(&tag))
-                    .map(|t| t.id)
-                    .ok_or_else(|| format!("no tag named {tag:?}"))?;
-                self.delete_tag_checked(tag_id)?;
-                Ok(format!("deleted tag \"{tag}\""))
-            }
             ChatAction::DeleteTask { task_id } => {
                 let title = self.task_title(task_id)?;
                 self.delete_task_checked(task_id)?;
@@ -854,36 +730,22 @@ impl AppState {
         self.selection = Selection::Task(id);
         self.highlighted_task = Some(id);
         self.project_edit_buffer = None;
-        self.tag_edit_buffer = None;
         self.task_edit_buffer = self
             .visible_tasks
             .iter()
             .find(|t| t.id == id)
-            .map(|t| TaskEditBuffer::from_task(t, &self.tags));
+            .map(TaskEditBuffer::from_task);
         self.detail_panel_open = true;
     }
 
     pub fn select_project(&mut self, id: ProjectId) {
         self.selection = Selection::Project(id);
         self.task_edit_buffer = None;
-        self.tag_edit_buffer = None;
         self.project_edit_buffer = self
             .projects
             .iter()
             .find(|p| p.id == id)
             .map(ProjectEditBuffer::from_project);
-        self.detail_panel_open = true;
-    }
-
-    pub fn select_tag(&mut self, id: TagId) {
-        self.selection = Selection::Tag(id);
-        self.task_edit_buffer = None;
-        self.project_edit_buffer = None;
-        self.tag_edit_buffer = self
-            .tags
-            .iter()
-            .find(|t| t.id == id)
-            .map(TagEditBuffer::from_tag);
         self.detail_panel_open = true;
     }
 
@@ -1096,7 +958,7 @@ impl AppState {
 
     /// Core of `delete_task`, with the failure surfaced as a `Result`
     /// instead of routed straight to `self.error_message` — used by the AI
-    /// chat panel, same as `delete_project_checked`/`delete_tag_checked`.
+    /// chat panel, same as `delete_project_checked`.
     fn delete_task_checked(&mut self, id: TaskId) -> Result<(), String> {
         task_repo::delete(&self.conn, id).map_err(|e| e.to_string())?;
         if self.selection == Selection::Task(id) {
@@ -1134,45 +996,10 @@ impl AppState {
         Ok(())
     }
 
-    pub fn delete_tag(&mut self, id: TagId) {
-        if let Err(e) = self.delete_tag_checked(id) {
-            self.error_message = Some(e);
-        }
-    }
-
-    /// Core of `delete_tag`, with the failure surfaced as a `Result` instead
-    /// of routed straight to `self.error_message` — used by the AI chat
-    /// panel, same as `delete_project_checked`.
-    fn delete_tag_checked(&mut self, id: TagId) -> Result<(), String> {
-        tag_repo::delete(&self.conn, id).map_err(|e| e.to_string())?;
-        self.refresh_tags();
-        if self.perspective == Perspective::Tag(id) {
-            // The perspective we were viewing no longer exists; fall back to Inbox
-            // (this also clears selection/edit buffers and refreshes the task list).
-            self.set_perspective(Perspective::Inbox);
-        } else {
-            if self.selection == Selection::Tag(id) {
-                self.clear_selection();
-            }
-            self.refresh_visible_tasks();
-        }
-        Ok(())
-    }
-
     pub fn save_task_edits(&mut self) {
         let Some(buf) = &self.task_edit_buffer else {
             return;
         };
-        let mut tag_ids = Vec::new();
-        for name in &buf.tag_names {
-            match tag_repo::get_or_create_by_name(&self.conn, name) {
-                Ok(tag) => tag_ids.push(tag.id),
-                Err(e) => {
-                    self.error_message = Some(e.to_string());
-                    return;
-                }
-            }
-        }
         let task = Task {
             id: buf.id,
             title: buf.title.clone(),
@@ -1184,7 +1011,6 @@ impl AppState {
             completed_at: buf.completed_at,
             created_at: buf.created_at,
             estimated_minutes: buf.estimated_minutes,
-            tags: tag_ids,
             recurrence: buf.recurrence,
         };
         if let Err(e) = task_repo::update(&self.conn, &task) {
@@ -1192,25 +1018,6 @@ impl AppState {
             return;
         }
         self.refresh_visible_tasks();
-        self.refresh_tags();
-    }
-
-    pub fn add_tag_to_edit_buffer(&mut self) {
-        if let Some(buf) = &mut self.task_edit_buffer {
-            let name = buf.new_tag_input.trim().to_string();
-            if !name.is_empty() && !buf.tag_names.contains(&name) {
-                buf.tag_names.push(name);
-            }
-            buf.new_tag_input.clear();
-        }
-        self.save_task_edits();
-    }
-
-    pub fn remove_tag_from_edit_buffer(&mut self, name: &str) {
-        if let Some(buf) = &mut self.task_edit_buffer {
-            buf.tag_names.retain(|t| t != name);
-        }
-        self.save_task_edits();
     }
 
     pub fn toggle_complete(&mut self, id: TaskId, completed: bool) {
@@ -1230,7 +1037,7 @@ impl AppState {
     }
 
     /// If the just-completed task repeats, creates its next occurrence: a
-    /// fresh task carrying over title/notes/project/tags/recurrence, due on
+    /// fresh task carrying over title/notes/project/recurrence, due on
     /// `recurrence.next_due_date` measured from today (the completion date —
     /// "repeat after completion" semantics). The completed task itself is
     /// left as-is, so it stays visible in Completed history.
@@ -1256,7 +1063,6 @@ impl AppState {
         next.project_id = task.project_id;
         next.due_date = Some(recurrence.next_due_date(completed_on));
         next.estimated_minutes = task.estimated_minutes;
-        next.tags = task.tags;
         next.recurrence = Some(recurrence);
 
         if let Err(e) = task_repo::create(&self.conn, &next) {
@@ -1314,50 +1120,6 @@ impl AppState {
             return;
         }
         self.refresh_projects();
-    }
-
-    pub fn create_tag(&mut self) {
-        let name = self.new_tag_name.trim();
-        if name.is_empty() {
-            return;
-        }
-        if self.tags.iter().any(|t| t.name == name) {
-            self.error_message = Some(format!("Tag \"{name}\" already exists"));
-            return;
-        }
-        let tag = Tag {
-            id: TagId::new(),
-            name: name.to_string(),
-        };
-        if let Err(e) = tag_repo::create(&self.conn, &tag) {
-            self.error_message = Some(e.to_string());
-            return;
-        }
-        self.new_tag_name.clear();
-        self.refresh_tags();
-    }
-
-    pub fn save_tag_edits(&mut self) {
-        let Some(buf) = &self.tag_edit_buffer else {
-            return;
-        };
-        if self
-            .tags
-            .iter()
-            .any(|t| t.id != buf.id && t.name == buf.name)
-        {
-            self.error_message = Some(format!("Tag \"{}\" already exists", buf.name));
-            return;
-        }
-        let tag = Tag {
-            id: buf.id,
-            name: buf.name.clone(),
-        };
-        if let Err(e) = tag_repo::update(&self.conn, &tag) {
-            self.error_message = Some(e.to_string());
-            return;
-        }
-        self.refresh_tags();
     }
 
     fn unwrap_or_report<T>(&mut self, result: DbResult<T>, default: T) -> T {
@@ -1456,21 +1218,6 @@ mod tests {
     }
 
     #[test]
-    fn quick_capture_tags_current_tag() {
-        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
-        state.new_tag_name = "errand".to_string();
-        state.create_tag();
-        let tag_id = state.tags[0].id;
-
-        state.set_perspective(Perspective::Tag(tag_id));
-        state.quick_entry_buffer = "buy stamps".to_string();
-        state.quick_capture_submit();
-
-        assert_eq!(state.visible_tasks.len(), 1);
-        assert_eq!(state.visible_tasks[0].tags, vec![tag_id]);
-    }
-
-    #[test]
     fn apply_parsed_task_matches_project_case_insensitively_and_sets_due_date() {
         let mut state = AppState::new(crate::db::open_in_memory().unwrap());
         state.new_project_name = "Kitchen Remodel".to_string();
@@ -1481,7 +1228,6 @@ mod tests {
         state.apply_parsed_task(ParsedTask {
             title: "pick tile".to_string(),
             due_date: Some(due),
-            tags: vec![],
             project: Some("kitchen remodel".to_string()),
             recurrence: None,
         });
@@ -1506,7 +1252,6 @@ mod tests {
         state.apply_parsed_task(ParsedTask {
             title: "pick tile".to_string(),
             due_date: None,
-            tags: vec![],
             project: None,
             recurrence: None,
         });
@@ -1522,7 +1267,6 @@ mod tests {
         state.apply_parsed_task(ParsedTask {
             title: "pick tile".to_string(),
             due_date: None,
-            tags: vec![],
             project: Some("Nonexistent Project".to_string()),
             recurrence: None,
         });
@@ -1533,31 +1277,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_parsed_task_creates_tags_and_keeps_current_tag_perspective() {
-        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
-        state.new_tag_name = "errand".to_string();
-        state.create_tag();
-        let errand_id = state.tags[0].id;
-        state.set_perspective(Perspective::Tag(errand_id));
-
-        state.apply_parsed_task(ParsedTask {
-            title: "buy stamps".to_string(),
-            due_date: None,
-            tags: vec!["shopping".to_string()],
-            project: None,
-            recurrence: None,
-        });
-
-        assert_eq!(state.tags.len(), 2);
-        let shopping_id = state.tags.iter().find(|t| t.name == "shopping").unwrap().id;
-        assert_eq!(state.visible_tasks.len(), 1);
-        let actual = &state.visible_tasks[0].tags;
-        assert_eq!(actual.len(), 2);
-        assert!(actual.contains(&shopping_id));
-        assert!(actual.contains(&errand_id));
-    }
-
-    #[test]
     fn apply_parsed_task_defaults_a_due_date_when_recurring_without_one() {
         use crate::domain::task::RecurrenceUnit;
 
@@ -1565,7 +1284,6 @@ mod tests {
         state.apply_parsed_task(ParsedTask {
             title: "inbox zero".to_string(),
             due_date: None,
-            tags: vec![],
             project: None,
             recurrence: Some(Recurrence {
                 interval: 1,
@@ -1692,115 +1410,6 @@ mod tests {
     }
 
     #[test]
-    fn chat_action_add_tag_creates_and_reuses_tags() {
-        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
-        state.quick_entry_buffer = "buy stamps".to_string();
-        state.quick_capture_submit();
-        let task_id = state.visible_tasks[0].id;
-
-        state.apply_chat_reply(ChatReply {
-            reply: "Tagged.".to_string(),
-            actions: vec![ChatAction::AddTag {
-                task_id,
-                tag: "errand".to_string(),
-            }],
-            parse_failures: Vec::new(),
-        });
-
-        assert_eq!(state.tags.len(), 1);
-        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
-        assert_eq!(task.tags, vec![state.tags[0].id]);
-    }
-
-    #[test]
-    fn chat_action_remove_tag_leaves_other_tags_on_the_task_intact() {
-        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
-        state.quick_entry_buffer = "buy stamps".to_string();
-        state.quick_capture_submit();
-        let task_id = state.visible_tasks[0].id;
-
-        state.apply_chat_reply(ChatReply {
-            reply: "Tagged.".to_string(),
-            actions: vec![
-                ChatAction::AddTag {
-                    task_id,
-                    tag: "errand".to_string(),
-                },
-                ChatAction::AddTag {
-                    task_id,
-                    tag: "urgent".to_string(),
-                },
-            ],
-            parse_failures: Vec::new(),
-        });
-        assert_eq!(state.tags.len(), 2);
-
-        state.apply_chat_reply(ChatReply {
-            reply: "Removed.".to_string(),
-            actions: vec![ChatAction::RemoveTag {
-                task_id,
-                tag: "errand".to_string(),
-            }],
-            parse_failures: Vec::new(),
-        });
-
-        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
-        let urgent_id = state.tags.iter().find(|t| t.name == "urgent").unwrap().id;
-        assert_eq!(task.tags, vec![urgent_id]);
-        // The tag itself still exists — only its link to this task was removed.
-        assert_eq!(state.tags.len(), 2);
-    }
-
-    #[test]
-    fn chat_action_delete_tag_removes_it_from_every_task_that_had_it() {
-        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
-        state.quick_entry_buffer = "buy stamps".to_string();
-        state.quick_capture_submit();
-        let task_id = state.visible_tasks[0].id;
-
-        state.apply_chat_reply(ChatReply {
-            reply: "Tagged.".to_string(),
-            actions: vec![ChatAction::AddTag {
-                task_id,
-                tag: "errand".to_string(),
-            }],
-            parse_failures: Vec::new(),
-        });
-        assert_eq!(state.tags.len(), 1);
-
-        state.apply_chat_reply(ChatReply {
-            reply: "Deleted the errand tag.".to_string(),
-            actions: vec![ChatAction::DeleteTag {
-                tag: "errand".to_string(),
-            }],
-            parse_failures: Vec::new(),
-        });
-
-        assert!(state.tags.is_empty());
-        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
-        assert!(task.tags.is_empty());
-    }
-
-    #[test]
-    fn chat_action_delete_tag_reports_an_unknown_tag_without_crashing() {
-        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
-
-        state.apply_chat_reply(ChatReply {
-            reply: "Deleted it.".to_string(),
-            actions: vec![ChatAction::DeleteTag {
-                tag: "Nonexistent".to_string(),
-            }],
-            parse_failures: Vec::new(),
-        });
-
-        assert!(
-            state.chat_history[0]
-                .content
-                .contains("no tag named \"Nonexistent\"")
-        );
-    }
-
-    #[test]
     fn chat_action_delete_task_removes_it() {
         let mut state = AppState::new(crate::db::open_in_memory().unwrap());
         state.quick_entry_buffer = "obsolete task".to_string();
@@ -1838,7 +1447,6 @@ mod tests {
                 task: ParsedTask {
                     title: "Review Rocket Money".to_string(),
                     due_date: Some(due),
-                    tags: vec![],
                     project: Some("Habits".to_string()),
                     recurrence: Some(Recurrence {
                         interval: 1,
@@ -1879,7 +1487,6 @@ mod tests {
                 task: ParsedTask {
                     title: "buy milk".to_string(),
                     due_date: None,
-                    tags: vec![],
                     project: Some("Nonexistent".to_string()),
                     recurrence: None,
                 },
@@ -2345,14 +1952,11 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_entries_lists_projects_and_tags_in_render_order() {
+    fn sidebar_entries_lists_projects_in_render_order() {
         let mut state = AppState::new(crate::db::open_in_memory().unwrap());
         state.new_project_name = "Kitchen Remodel".to_string();
         state.create_project();
-        state.new_tag_name = "errand".to_string();
-        state.create_tag();
         let project_id = state.projects[0].id;
-        let tag_id = state.tags[0].id;
 
         let entries = state.sidebar_entries();
         assert_eq!(
@@ -2363,8 +1967,6 @@ mod tests {
                 Perspective::Overdue,
                 Perspective::Completed,
                 Perspective::Project(project_id),
-                Perspective::AllTags,
-                Perspective::Tag(tag_id),
             ]
         );
     }

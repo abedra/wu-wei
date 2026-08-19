@@ -130,6 +130,6 @@ impl Provider for OpenAiProvider {
 
         let raw: RawChatReply = serde_json::from_str(&content)
             .map_err(|e| format!("failed to parse chat reply JSON: {e}"))?;
-        Ok(raw.into_chat_reply(&context.project_names, &context.tag_names))
+        Ok(raw.into_chat_reply(&context.project_names))
     }
 }

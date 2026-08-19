@@ -1,7 +1,7 @@
 use eframe::egui;
 use rusqlite::Connection;
 
-use crate::state::{AppState, Perspective, Selection};
+use crate::state::{AppState, Selection};
 use crate::ui;
 
 pub struct LoaApp {
@@ -40,9 +40,8 @@ impl eframe::App for LoaApp {
                 .show(ui, |ui| match self.state.selection {
                     Selection::Task(_) => ui::task_detail::draw(ui, &mut self.state),
                     Selection::Project(_) => ui::project_view::draw_detail(ui, &mut self.state),
-                    Selection::Tag(_) => ui::tag_view::draw_detail(ui, &mut self.state),
                     Selection::None => {
-                        ui.label("Select a task, project, or tag.");
+                        ui.label("Select a task or project.");
                     }
                 });
         }
@@ -64,9 +63,6 @@ impl eframe::App for LoaApp {
             });
         }
 
-        egui::CentralPanel::default().show(ui, |ui| match self.state.perspective {
-            Perspective::AllTags => ui::tag_view::draw_list(ui, &mut self.state),
-            _ => ui::task_list::draw(ui, &mut self.state),
-        });
+        egui::CentralPanel::default().show(ui, |ui| ui::task_list::draw(ui, &mut self.state));
     }
 }

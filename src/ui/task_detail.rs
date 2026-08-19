@@ -109,8 +109,6 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     let projects = state.projects.clone();
 
     let mut dirty = false;
-    let mut add_tag_clicked = false;
-    let mut remove_tag: Option<String> = None;
     let mut toggle_completed: Option<bool> = None;
     let mut delete_clicked = false;
 
@@ -160,27 +158,6 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
         }
 
         ui.separator();
-        ui.label("Tags");
-        ui.horizontal_wrapped(|ui| {
-            for name in &buf.tag_names {
-                if ui
-                    .selectable_label(false, format!("{name} \u{2715}"))
-                    .clicked()
-                {
-                    remove_tag = Some(name.clone());
-                }
-            }
-        });
-        ui.horizontal(|ui| {
-            let response = ui.text_edit_singleline(&mut buf.new_tag_input);
-            let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let add_clicked = ui.button("Add tag").clicked();
-            if (response.lost_focus() && enter_pressed) || add_clicked {
-                add_tag_clicked = true;
-            }
-        });
-
-        ui.separator();
         if ui.button("Delete Task").clicked() {
             delete_clicked = true;
         }
@@ -197,11 +174,5 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     }
     if let Some(completed) = toggle_completed {
         state.toggle_complete(task_id, completed);
-    }
-    if let Some(name) = remove_tag {
-        state.remove_tag_from_edit_buffer(&name);
-    }
-    if add_tag_clicked {
-        state.add_tag_to_edit_buffer();
     }
 }

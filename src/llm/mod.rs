@@ -10,12 +10,11 @@ use chrono::NaiveDate;
 use crate::domain::task::{Recurrence, TaskId};
 
 /// A task as extracted from free text by an LLM, before it's turned into a
-/// real [`crate::domain::task::Task`] (which needs project/tag IDs, not names).
+/// real [`crate::domain::task::Task`] (which needs a project id, not a name).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedTask {
     pub title: String,
     pub due_date: Option<NaiveDate>,
-    pub tags: Vec<String>,
     pub project: Option<String>,
     pub recurrence: Option<Recurrence>,
 }
@@ -48,19 +47,17 @@ pub struct ChatTaskSummary {
     pub title: String,
     pub project: Option<String>,
     pub due_date: Option<NaiveDate>,
-    pub tags: Vec<String>,
 }
 
 pub struct ChatContext {
     pub today: NaiveDate,
     pub tasks: Vec<ChatTaskSummary>,
     pub project_names: Vec<String>,
-    pub tag_names: Vec<String>,
 }
 
 /// A single database mutation the model asked for, already validated (task
-/// id parses, action name recognized). DeleteTask/DeleteProject/DeleteTag
-/// are all genuinely irreversible from the UI (no undo) — the "Actions
+/// id parses, action name recognized). DeleteTask/DeleteProject
+/// are both genuinely irreversible from the UI (no undo) — the "Actions
 /// taken"/"This didn't actually happen" reporting in
 /// `AppState::apply_chat_reply` is what keeps them honest, not restraint on
 /// which actions exist.
@@ -93,14 +90,6 @@ pub enum ChatAction {
     MoveToInbox {
         task_id: TaskId,
     },
-    AddTag {
-        task_id: TaskId,
-        tag: String,
-    },
-    RemoveTag {
-        task_id: TaskId,
-        tag: String,
-    },
     CreateTask {
         task: ParsedTask,
     },
@@ -109,9 +98,6 @@ pub enum ChatAction {
     },
     DeleteProject {
         project: String,
-    },
-    DeleteTag {
-        tag: String,
     },
     DeleteTask {
         task_id: TaskId,

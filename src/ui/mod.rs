@@ -6,7 +6,6 @@ pub mod project_view;
 pub mod quick_capture;
 pub mod shortcuts;
 pub mod sidebar;
-pub mod tag_view;
 pub mod task_detail;
 pub mod task_list;
 pub mod theme;

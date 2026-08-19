@@ -2,7 +2,6 @@ use chrono::{DateTime, Months, NaiveDate, Utc};
 use uuid::Uuid;
 
 use crate::domain::project::ProjectId;
-use crate::domain::tag::TagId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TaskId(pub Uuid);
@@ -80,7 +79,6 @@ pub struct Task {
     pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub estimated_minutes: Option<i64>,
-    pub tags: Vec<TagId>,
     pub recurrence: Option<Recurrence>,
 }
 
@@ -97,7 +95,6 @@ impl Task {
             completed_at: None,
             created_at: Utc::now(),
             estimated_minutes: None,
-            tags: Vec::new(),
             recurrence: None,
         }
     }

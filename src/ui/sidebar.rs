@@ -27,8 +27,6 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
         if matches!(perspective, Perspective::Project(_)) && !shown_projects_label {
             section_label(ui, "Projects");
             shown_projects_label = true;
-        } else if perspective == Perspective::AllTags {
-            section_label(ui, "Tags");
         }
 
         let label = label_for(state, perspective);
@@ -65,13 +63,6 @@ fn label_for(state: &AppState, perspective: Perspective) -> String {
             .iter()
             .find(|p| p.id == id)
             .map(|p| p.name.clone())
-            .unwrap_or_default(),
-        Perspective::AllTags => "Manage Tags".to_string(),
-        Perspective::Tag(id) => state
-            .tags
-            .iter()
-            .find(|t| t.id == id)
-            .map(|t| t.name.clone())
             .unwrap_or_default(),
     }
 }

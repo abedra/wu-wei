@@ -41,13 +41,12 @@ pub fn system_prompt(context: &PromptContext) -> String {
          GTD-style task manager. Today's date is {today} ({today_weekday}). For resolving \
          relative or named-weekday dates, here are the next 7 days: {weekdays} — use this \
          lookup rather than computing weekdays yourself. Existing projects: {projects}. \
-         Extract: a short imperative title with any date/project/tag/recurrence phrases \
+         Extract: a short imperative title with any date/project/recurrence phrases \
          removed; a due_date (YYYY-MM-DD) if the text implies one, resolving relative \
          dates like \"tomorrow\" or \"next week\" and named weekdays like \"Friday\" \
-         against the lookup above, else null; tags as short \
-         lowercase single words (from hashtags or clearly implied topics), else an empty \
-         list; a project name copied exactly from the existing projects list if one is \
-         clearly implied, else null — never invent a new project name; recurrence as \
+         against the lookup above, else null; a project name copied exactly from the \
+         existing projects list if one is clearly implied, else null — never invent a \
+         new project name; recurrence as \
          {{interval, unit}} if the text implies \
          the task repeats — \"daily\"/\"every day\" -> {{interval:1, unit:\"days\"}}, \
          \"weekly\" -> {{interval:1, unit:\"weeks\"}}, \"every 3 days\" -> {{interval:3, \
@@ -89,11 +88,10 @@ pub fn response_schema() -> Value {
         "properties": {
             "title": { "type": "string" },
             "due_date": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
-            "tags": { "type": "array", "items": { "type": "string" } },
             "project": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
             "recurrence": recurrence_schema()
         },
-        "required": ["title", "due_date", "tags", "project", "recurrence"],
+        "required": ["title", "due_date", "project", "recurrence"],
         "additionalProperties": false
     })
 }
@@ -141,7 +139,6 @@ fn parse_required_recurrence(kind: &str, raw: Option<RawRecurrence>) -> Result<R
 pub struct RawExtraction {
     pub title: String,
     pub due_date: Option<String>,
-    pub tags: Vec<String>,
     pub project: Option<String>,
     pub recurrence: Option<RawRecurrence>,
 }
@@ -155,7 +152,6 @@ impl RawExtraction {
         Ok(ParsedTask {
             title,
             due_date: parse_optional_due_date(self.due_date)?,
-            tags: self.tags,
             project: self.project.filter(|p| !p.trim().is_empty()),
             recurrence: parse_optional_recurrence(self.recurrence)?,
         })
@@ -172,11 +168,6 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
     } else {
         context.project_names.join(", ")
     };
-    let tags = if context.tag_names.is_empty() {
-        "(none yet)".to_string()
-    } else {
-        context.tag_names.join(", ")
-    };
     let tasks_json = serde_json::to_string(
         &context
             .tasks
@@ -187,7 +178,6 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
                     "title": t.title,
                     "project": t.project,
                     "due_date": t.due_date.map(|d| d.format("%Y-%m-%d").to_string()),
-                    "tags": t.tags,
                 })
             })
             .collect::<Vec<_>>(),
@@ -204,7 +194,7 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
          computing weekdays yourself; getting the day-of-week arithmetic wrong is a common \
          mistake, so always check a date you resolve against this list rather than trusting \
          your own calculation. Existing projects: \
-         {projects}. Existing tags: {tags}. Here is the user's current set of open (not \
+         {projects}. Here is the user's current set of open (not \
          completed) tasks as JSON — only ever reference a task by an \"id\" value copied \
          verbatim from this list, never invent one: {tasks_json}\n\n\
          Recurrence is a real, fully automatic feature of this app — a task with a recurrence \
@@ -223,27 +213,24 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
          clear_recurrence (task_id — makes an existing task stop repeating; it still keeps \
          whatever due date it has), complete_task (task_id), reopen_task (task_id), \
          move_to_project (task_id, project — copied exactly \
-         from the existing projects list, never invent one), move_to_inbox (task_id), add_tag \
-         (task_id, tag — a new tag is fine, it doesn't need to already exist), remove_tag \
-         (task_id, tag — copied exactly from the existing tags list; only removes it from this \
-         one task), create_project (project — the new project's name; if a project with that \
+         from the existing projects list, never invent one), move_to_inbox (task_id), \
+         create_project (project — the new project's name; if a project with that \
          name already exists, don't recreate it), delete_project (project — copied exactly \
          from the existing projects list; this does not delete that project's tasks, they move \
-         to the Inbox, same as deleting a project from the app's UI), delete_tag (tag — copied \
-         exactly from the existing tags list; this deletes the tag itself, removing it from \
-         every task that had it, not just one), delete_task (task_id — permanently deletes the \
-         task itself; only use this when the user clearly wants the task gone for good, not \
+         to the Inbox, same as deleting a project from the app's UI), delete_task (task_id — \
+         permanently deletes the task itself; only use this when the user clearly wants the \
+         task gone for good, not \
          just done or filed away — complete_task or move_to_inbox are usually what they mean), \
-         create_task (title, due_date, project, tags, recurrence — same fields and \
+         create_task (title, due_date, project, recurrence — same fields and \
          rules as quick capture; title is required, everything else is optional; project must \
          match an existing project exactly or be null, never invent one; this is the only way \
          to add a brand new task — never try to create one by sending other actions against a \
          task_id that doesn't exist in the list above). create_project/delete_project/\
-         delete_tag/create_task act on a project, tag, or a not-yet-existing task, so leave \
+         create_task act on a project or a not-yet-existing task, so leave \
          task_id null for them; every other action, including delete_task, needs a task_id \
          taken from the open-tasks list above. If a command implies several tasks \
          (e.g. \"all overdue tasks\"), emit one action per matching task. If the request is \
-         ambiguous or no task/project/tag clearly matches, ask for clarification in your reply \
+         ambiguous or no task/project clearly matches, ask for clarification in your reply \
          and return an empty actions list rather than guessing. Every field an action's type \
          needs (see above) must actually be filled in with a real value, never left null or \
          empty — an action with a missing field is dropped and does not happen. Only describe \
@@ -254,7 +241,6 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
         today_weekday = context.today.format("%A"),
         weekdays = weekday_reference(context.today),
         projects = projects,
-        tags = tags,
         tasks_json = tasks_json,
     )
 }
@@ -279,25 +265,18 @@ pub fn chat_response_schema() -> Value {
                                 "set_due_date", "clear_due_date", "set_recurrence",
                                 "clear_recurrence", "complete_task", "reopen_task",
                                 "move_to_project", "move_to_inbox",
-                                "add_tag", "remove_tag", "create_project", "delete_project",
-                                "delete_tag", "delete_task", "create_task"
+                                "create_project", "delete_project",
+                                "delete_task", "create_task"
                             ]
                         },
                         "task_id": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
                         "due_date": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
                         "project": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
-                        "tag": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
                         "title": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
-                        "tags": {
-                            "anyOf": [
-                                { "type": "array", "items": { "type": "string" } },
-                                { "type": "null" }
-                            ]
-                        },
                         "recurrence": recurrence_schema()
                     },
                     "required": [
-                        "type", "task_id", "due_date", "project", "tag", "title", "tags",
+                        "type", "task_id", "due_date", "project", "title",
                         "recurrence"
                     ],
                     "additionalProperties": false
@@ -316,9 +295,7 @@ pub struct RawChatAction {
     pub task_id: Option<String>,
     pub due_date: Option<String>,
     pub project: Option<String>,
-    pub tag: Option<String>,
     pub title: Option<String>,
-    pub tags: Option<Vec<String>>,
     pub recurrence: Option<RawRecurrence>,
 }
 
@@ -334,28 +311,25 @@ impl RawChatReply {
     /// other, validly-formed action in the same response — see
     /// `ChatReply::parse_failures`.
     ///
-    /// `project_names`/`tag_names` are the real, current lists (from
-    /// `ChatContext`) — used to recover a `delete_project`/`delete_tag`
-    /// action whose `project`/`tag` field the model left empty, by checking
-    /// whether its reply names exactly one of them. This is more reliable
-    /// than quote-spotting since it's checked against ground truth rather
-    /// than punctuation the model may not have used.
-    pub fn into_chat_reply(self, project_names: &[String], tag_names: &[String]) -> ChatReply {
-        // Weaker models sometimes name a new/target project or tag only in
-        // their prose reply (e.g. "Created new project 'Wei-wu'." or
-        // "Deleted the Recurring project.") and leave the matching action's
-        // `project`/`tag` field empty despite the prompt saying not to. When
-        // that's the failure, try to recover the name from the reply rather
-        // than reporting an action the model clearly did intend.
+    /// `project_names` is the real, current list (from `ChatContext`) — used
+    /// to recover a `delete_project` action whose `project` field the model
+    /// left empty, by checking whether its reply names exactly one of them.
+    /// This is more reliable than quote-spotting since it's checked against
+    /// ground truth rather than punctuation the model may not have used.
+    pub fn into_chat_reply(self, project_names: &[String]) -> ChatReply {
+        // Weaker models sometimes name a new/target project only in their
+        // prose reply (e.g. "Created new project 'Wei-wu'." or "Deleted the
+        // Recurring project.") and leave the matching action's `project`
+        // field empty despite the prompt saying not to. When that's the
+        // failure, try to recover the name from the reply rather than
+        // reporting an action the model clearly did intend.
         let quoted_name = single_quoted_name(&self.reply);
         let known_project = single_known_name_mentioned(&self.reply, project_names);
-        let known_tag = single_known_name_mentioned(&self.reply, tag_names);
 
         let mut actions = Vec::new();
         let mut parse_failures = Vec::new();
         for raw in self.actions {
             let kind = raw.kind.clone();
-            let task_id_field = raw.task_id.clone();
             match raw.into_chat_action() {
                 Ok(action) => actions.push(action),
                 Err(e) if e.contains("missing a project") => match kind.as_str() {
@@ -375,22 +349,6 @@ impl RawChatReply {
                     },
                     _ => parse_failures.push(e),
                 },
-                Err(e) if e.contains("missing a tag") => {
-                    // Both a new tag name (add_tag) and an existing one
-                    // (delete_tag) can be quoted; only an existing one can
-                    // also be cross-checked against the known list.
-                    let recovered = known_tag.as_ref().or(quoted_name.as_ref()).cloned();
-                    match (kind.as_str(), recovered) {
-                        ("delete_tag", Some(tag)) => actions.push(ChatAction::DeleteTag { tag }),
-                        ("remove_tag", Some(tag)) => {
-                            match parse_required_task_id("remove_tag", task_id_field) {
-                                Ok(task_id) => actions.push(ChatAction::RemoveTag { task_id, tag }),
-                                Err(_) => parse_failures.push(e),
-                            }
-                        }
-                        _ => parse_failures.push(e),
-                    }
-                }
                 Err(e) => parse_failures.push(e),
             }
         }
@@ -428,7 +386,7 @@ fn single_quoted_name(text: &str) -> Option<String> {
     }
 }
 
-/// Which of `known_names` (a project or tag list) appears (case-
+/// Which of `known_names` (a project name list) appears (case-
 /// insensitively) as a substring of `text`, if exactly one does — checked
 /// against the real list rather than punctuation, so it doesn't depend on
 /// the model having quoted the name at all.
@@ -456,11 +414,6 @@ fn parse_required_due_date(kind: &str, raw: Option<String>) -> Result<NaiveDate,
 fn parse_required_project(kind: &str, raw: Option<String>) -> Result<String, String> {
     raw.filter(|p| !p.trim().is_empty())
         .ok_or_else(|| format!("model's {kind:?} action is missing a project"))
-}
-
-fn parse_required_tag(kind: &str, raw: Option<String>) -> Result<String, String> {
-    raw.filter(|t| !t.trim().is_empty())
-        .ok_or_else(|| format!("model's {kind:?} action is missing a tag"))
 }
 
 fn parse_required_task_id(kind: &str, raw: Option<String>) -> Result<TaskId, String> {
@@ -502,22 +455,11 @@ impl RawChatAction {
             "move_to_inbox" => Ok(ChatAction::MoveToInbox {
                 task_id: parse_required_task_id("move_to_inbox", self.task_id)?,
             }),
-            "add_tag" => Ok(ChatAction::AddTag {
-                task_id: parse_required_task_id("add_tag", self.task_id)?,
-                tag: parse_required_tag("add_tag", self.tag)?,
-            }),
-            "remove_tag" => Ok(ChatAction::RemoveTag {
-                task_id: parse_required_task_id("remove_tag", self.task_id)?,
-                tag: parse_required_tag("remove_tag", self.tag)?,
-            }),
             "create_project" => Ok(ChatAction::CreateProject {
                 name: parse_required_project("create_project", self.project)?,
             }),
             "delete_project" => Ok(ChatAction::DeleteProject {
                 project: parse_required_project("delete_project", self.project)?,
-            }),
-            "delete_tag" => Ok(ChatAction::DeleteTag {
-                tag: parse_required_tag("delete_tag", self.tag)?,
             }),
             "delete_task" => Ok(ChatAction::DeleteTask {
                 task_id: parse_required_task_id("delete_task", self.task_id)?,
@@ -534,7 +476,6 @@ impl RawChatAction {
                     task: ParsedTask {
                         title,
                         due_date: parse_optional_due_date(self.due_date)?,
-                        tags: self.tags.unwrap_or_default(),
                         project: self.project.filter(|p| !p.trim().is_empty()),
                         recurrence: parse_optional_recurrence(self.recurrence)?,
                     },
@@ -565,7 +506,6 @@ mod tests {
         RawExtraction {
             title: title.to_string(),
             due_date: due_date.map(str::to_string),
-            tags: vec!["errand".to_string()],
             project: project.map(str::to_string),
             recurrence: None,
         }
@@ -582,7 +522,6 @@ mod tests {
             Some(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap())
         );
         assert_eq!(parsed.project, Some("Groceries".to_string()));
-        assert_eq!(parsed.tags, vec!["errand".to_string()]);
     }
 
     #[test]
@@ -655,9 +594,7 @@ mod tests {
             task_id: Some(task_id.to_string()),
             due_date: None,
             project: None,
-            tag: None,
             title: None,
-            tags: None,
             recurrence: None,
         }
     }
@@ -668,9 +605,7 @@ mod tests {
             task_id: None,
             due_date: None,
             project: None,
-            tag: None,
             title: None,
-            tags: None,
             recurrence: None,
         }
     }
@@ -790,7 +725,7 @@ mod tests {
             reply: "Done.".to_string(),
             actions: vec![chat_action("complete_task", &id.0.to_string())],
         };
-        let reply = raw.into_chat_reply(&[], &[]);
+        let reply = raw.into_chat_reply(&[]);
         assert_eq!(reply.reply, "Done.");
         assert_eq!(reply.actions, vec![ChatAction::CompleteTask { task_id: id }]);
         assert!(reply.parse_failures.is_empty());
@@ -805,7 +740,7 @@ mod tests {
             reply: "Rolled the overdue task and made a new project.".to_string(),
             actions: vec![chat_action("complete_task", &id.0.to_string()), broken],
         };
-        let reply = raw.into_chat_reply(&[], &[]);
+        let reply = raw.into_chat_reply(&[]);
         assert_eq!(
             reply.reply,
             "Rolled the overdue task and made a new project."
@@ -821,7 +756,7 @@ mod tests {
             reply: "Created new project 'Wei-wu'.".to_string(),
             actions: vec![project_chat_action("create_project")],
         };
-        let reply = raw.into_chat_reply(&[], &[]);
+        let reply = raw.into_chat_reply(&[]);
         assert_eq!(
             reply.actions,
             vec![ChatAction::CreateProject {
@@ -837,7 +772,7 @@ mod tests {
             reply: "Deleted the \"Wei-wu\" project.".to_string(),
             actions: vec![project_chat_action("delete_project")],
         };
-        let reply = raw.into_chat_reply(&[], &[]);
+        let reply = raw.into_chat_reply(&[]);
         assert_eq!(
             reply.actions,
             vec![ChatAction::DeleteProject {
@@ -853,7 +788,7 @@ mod tests {
             reply: "Created the new project.".to_string(),
             actions: vec![project_chat_action("create_project")],
         };
-        let reply = raw.into_chat_reply(&[], &[]);
+        let reply = raw.into_chat_reply(&[]);
         assert!(reply.actions.is_empty());
         assert_eq!(reply.parse_failures.len(), 1);
     }
@@ -869,7 +804,7 @@ mod tests {
             actions: vec![project_chat_action("delete_project")],
         };
         let known = vec!["Recurring".to_string(), "Wei-wu".to_string()];
-        let reply = raw.into_chat_reply(&known, &[]);
+        let reply = raw.into_chat_reply(&known);
         assert_eq!(
             reply.actions,
             vec![ChatAction::DeleteProject {
@@ -886,7 +821,7 @@ mod tests {
             actions: vec![project_chat_action("delete_project")],
         };
         let known = vec!["Recurring".to_string(), "Wei-wu".to_string()];
-        let reply = raw.into_chat_reply(&known, &[]);
+        let reply = raw.into_chat_reply(&known);
         assert!(reply.actions.is_empty());
         assert_eq!(reply.parse_failures.len(), 1);
     }
@@ -901,7 +836,7 @@ mod tests {
             actions: vec![project_chat_action("create_project")],
         };
         let known = vec!["Recurring".to_string()];
-        let reply = raw.into_chat_reply(&known, &[]);
+        let reply = raw.into_chat_reply(&known);
         assert!(reply.actions.is_empty());
         assert_eq!(reply.parse_failures.len(), 1);
     }
@@ -912,37 +847,9 @@ mod tests {
             reply: "Created 'Wei-wu', separate from 'Wei-mu'.".to_string(),
             actions: vec![project_chat_action("create_project")],
         };
-        let reply = raw.into_chat_reply(&[], &[]);
+        let reply = raw.into_chat_reply(&[]);
         assert!(reply.actions.is_empty());
         assert_eq!(reply.parse_failures.len(), 1);
-    }
-
-    #[test]
-    fn parses_a_remove_tag_action() {
-        let id = TaskId::new();
-        let mut raw = chat_action("remove_tag", &id.0.to_string());
-        raw.tag = Some("errand".to_string());
-        let action = raw.into_chat_action().unwrap();
-        assert_eq!(
-            action,
-            ChatAction::RemoveTag {
-                task_id: id,
-                tag: "errand".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_a_delete_tag_action() {
-        let mut raw = project_chat_action("delete_tag");
-        raw.tag = Some("errand".to_string());
-        let action = raw.into_chat_action().unwrap();
-        assert_eq!(
-            action,
-            ChatAction::DeleteTag {
-                tag: "errand".to_string(),
-            }
-        );
     }
 
     #[test]
@@ -1007,7 +914,6 @@ mod tests {
         raw.title = Some("Review Rocket Money".to_string());
         raw.due_date = Some("2026-08-24".to_string());
         raw.project = Some("Habits".to_string());
-        raw.tags = Some(vec!["finance".to_string()]);
         raw.recurrence = Some(RawRecurrence {
             interval: 1,
             unit: "weeks".to_string(),
@@ -1019,7 +925,6 @@ mod tests {
                 task: ParsedTask {
                     title: "Review Rocket Money".to_string(),
                     due_date: Some(NaiveDate::from_ymd_opt(2026, 8, 24).unwrap()),
-                    tags: vec!["finance".to_string()],
                     project: Some("Habits".to_string()),
                     recurrence: Some(Recurrence {
                         interval: 1,
@@ -1041,7 +946,6 @@ mod tests {
                 task: ParsedTask {
                     title: "buy milk".to_string(),
                     due_date: None,
-                    tags: Vec::new(),
                     project: None,
                     recurrence: None,
                 },
@@ -1057,60 +961,4 @@ mod tests {
         assert!(err.contains("missing a title"));
     }
 
-    #[test]
-    fn rejects_a_delete_tag_action_missing_a_tag() {
-        let err = project_chat_action("delete_tag")
-            .into_chat_action()
-            .unwrap_err();
-        assert!(err.contains("missing a tag"));
-    }
-
-    #[test]
-    fn recovers_a_delete_tag_action_from_an_unquoted_but_known_tag_name() {
-        let raw = RawChatReply {
-            reply: "Deleted the errand tag entirely.".to_string(),
-            actions: vec![project_chat_action("delete_tag")],
-        };
-        let known_tags = vec!["errand".to_string(), "inbox".to_string()];
-        let reply = raw.into_chat_reply(&[], &known_tags);
-        assert_eq!(
-            reply.actions,
-            vec![ChatAction::DeleteTag {
-                tag: "errand".to_string(),
-            }]
-        );
-        assert!(reply.parse_failures.is_empty());
-    }
-
-    #[test]
-    fn recovers_a_remove_tag_action_from_a_quoted_reply() {
-        let id = TaskId::new();
-        let mut raw = chat_action("remove_tag", &id.0.to_string());
-        raw.tag = None; // missing the required field
-        let reply = RawChatReply {
-            reply: "Removed 'errand' from that task.".to_string(),
-            actions: vec![raw],
-        };
-        let reply = reply.into_chat_reply(&[], &[]);
-        assert_eq!(
-            reply.actions,
-            vec![ChatAction::RemoveTag {
-                task_id: id,
-                tag: "errand".to_string(),
-            }]
-        );
-        assert!(reply.parse_failures.is_empty());
-    }
-
-    #[test]
-    fn does_not_guess_a_delete_tag_name_when_no_known_tag_is_mentioned() {
-        let raw = RawChatReply {
-            reply: "Deleted it.".to_string(),
-            actions: vec![project_chat_action("delete_tag")],
-        };
-        let known_tags = vec!["errand".to_string()];
-        let reply = raw.into_chat_reply(&[], &known_tags);
-        assert!(reply.actions.is_empty());
-        assert_eq!(reply.parse_failures.len(), 1);
-    }
 }

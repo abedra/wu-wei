@@ -24,18 +24,6 @@ CREATE TABLE IF NOT EXISTS tasks (
     recurrence_unit     TEXT        -- 'days' | 'weeks' | 'months'; NULL = not recurring
 );
 
-CREATE TABLE IF NOT EXISTS tags (
-    id    TEXT PRIMARY KEY NOT NULL,
-    name  TEXT NOT NULL UNIQUE
-);
-
-CREATE TABLE IF NOT EXISTS task_tags (
-    task_id  TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    tag_id   TEXT NOT NULL REFERENCES tags(id)  ON DELETE CASCADE,
-    PRIMARY KEY (task_id, tag_id)
-);
-
 CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_due_date    ON tasks(due_date);
 CREATE INDEX IF NOT EXISTS idx_tasks_completed   ON tasks(completed);
-CREATE INDEX IF NOT EXISTS idx_task_tags_tag_id  ON task_tags(tag_id);

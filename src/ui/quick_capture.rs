@@ -16,12 +16,6 @@ fn target_label(state: &AppState) -> String {
             .find(|p| p.id == id)
             .map(|p| format!("New task (in {}):", p.name))
             .unwrap_or_else(|| "New task:".to_string()),
-        Perspective::Tag(id) => state
-            .tags
-            .iter()
-            .find(|t| t.id == id)
-            .map(|t| format!("New task (tagged {}):", t.name))
-            .unwrap_or_else(|| "New task:".to_string()),
         _ => "New task:".to_string(),
     }
 }

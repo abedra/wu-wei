@@ -69,12 +69,11 @@ fn handle_focus_sidebar(ctx: &egui::Context, state: &mut AppState) {
 }
 
 fn handle_perspective_switches(ctx: &egui::Context, state: &mut AppState) {
-    const PERSPECTIVE_KEYS: [(egui::Key, Perspective); 5] = [
+    const PERSPECTIVE_KEYS: [(egui::Key, Perspective); 4] = [
         (egui::Key::Num1, Perspective::Inbox),
-        (egui::Key::Num2, Perspective::AllTags),
-        (egui::Key::Num3, Perspective::Today),
-        (egui::Key::Num4, Perspective::Completed),
-        (egui::Key::Num5, Perspective::Overdue),
+        (egui::Key::Num2, Perspective::Today),
+        (egui::Key::Num3, Perspective::Completed),
+        (egui::Key::Num4, Perspective::Overdue),
     ];
     for (key, perspective) in PERSPECTIVE_KEYS {
         let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, key);
@@ -175,7 +174,7 @@ fn handle_task_navigation(ctx: &egui::Context, state: &mut AppState) {
 
 /// Enter opens the detail panel for the highlighted task, or closes it again
 /// if it's already showing that same task. Guarded like Space, below, so it
-/// doesn't hijack Enter from text fields (quick capture, tag input, ...).
+/// doesn't hijack Enter from text fields (quick capture, ...).
 fn handle_toggle_details(ctx: &egui::Context, state: &mut AppState) {
     if state.any_picker_open() {
         return;

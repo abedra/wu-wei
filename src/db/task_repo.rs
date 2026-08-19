@@ -4,7 +4,6 @@ use uuid::Uuid;
 
 use super::error::{DbError, DbResult};
 use crate::domain::project::ProjectId;
-use crate::domain::tag::TagId;
 use crate::domain::task::{Recurrence, RecurrenceUnit, Task, TaskId};
 
 pub fn create(conn: &Connection, task: &Task) -> DbResult<()> {
@@ -28,7 +27,6 @@ pub fn create(conn: &Connection, task: &Task) -> DbResult<()> {
             task.recurrence.map(|r| r.unit.as_str()),
         ],
     )?;
-    set_tags_for_task(conn, task.id, &task.tags)?;
     Ok(())
 }
 
@@ -53,7 +51,6 @@ pub fn update(conn: &Connection, task: &Task) -> DbResult<()> {
             task.recurrence.map(|r| r.unit.as_str()),
         ],
     )?;
-    set_tags_for_task(conn, task.id, &task.tags)?;
     Ok(())
 }
 
@@ -66,19 +63,16 @@ pub fn delete(conn: &Connection, id: TaskId) -> DbResult<()> {
 }
 
 pub fn get(conn: &Connection, id: TaskId) -> DbResult<Option<Task>> {
-    let task = conn
-        .query_row(
-            "SELECT id, title, notes, project_id, due_date, defer_date,
-                    completed, completed_at, created_at, estimated_minutes,
-                    recurrence_interval, recurrence_unit
-             FROM tasks WHERE id = ?1",
-            params![id.0.to_string()],
-            row_to_task,
-        )
-        .optional()?;
-    let mut tasks: Vec<Task> = task.into_iter().collect();
-    attach_tags(conn, &mut tasks)?;
-    Ok(tasks.into_iter().next())
+    conn.query_row(
+        "SELECT id, title, notes, project_id, due_date, defer_date,
+                completed, completed_at, created_at, estimated_minutes,
+                recurrence_interval, recurrence_unit
+         FROM tasks WHERE id = ?1",
+        params![id.0.to_string()],
+        row_to_task,
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 pub fn list_all(conn: &Connection) -> DbResult<Vec<Task>> {
@@ -101,23 +95,6 @@ pub fn list_by_project(conn: &Connection, project_id: ProjectId) -> DbResult<Vec
         params![project_id.0.to_string()],
         "created_at",
     )
-}
-
-pub fn list_by_tag(conn: &Connection, tag_id: TagId) -> DbResult<Vec<Task>> {
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.title, t.notes, t.project_id, t.due_date, t.defer_date,
-                t.completed, t.completed_at, t.created_at, t.estimated_minutes,
-                t.recurrence_interval, t.recurrence_unit
-         FROM tasks t
-         JOIN task_tags tt ON tt.task_id = t.id
-         WHERE tt.tag_id = ?1
-         ORDER BY t.created_at",
-    )?;
-    let mut tasks: Vec<Task> = stmt
-        .query_map(params![tag_id.0.to_string()], row_to_task)?
-        .collect::<Result<_, _>>()?;
-    attach_tags(conn, &mut tasks)?;
-    Ok(tasks)
 }
 
 pub fn list_today(conn: &Connection, today: NaiveDate) -> DbResult<Vec<Task>> {
@@ -191,20 +168,6 @@ pub fn list_open(conn: &Connection) -> DbResult<Vec<Task>> {
     list_where(conn, "completed = 0", params![], "created_at")
 }
 
-pub fn set_tags_for_task(conn: &Connection, task_id: TaskId, tag_ids: &[TagId]) -> DbResult<()> {
-    conn.execute(
-        "DELETE FROM task_tags WHERE task_id = ?1",
-        params![task_id.0.to_string()],
-    )?;
-    for tag_id in tag_ids {
-        conn.execute(
-            "INSERT INTO task_tags (task_id, tag_id) VALUES (?1, ?2)",
-            params![task_id.0.to_string(), tag_id.0.to_string()],
-        )?;
-    }
-    Ok(())
-}
-
 fn list_where(
     conn: &Connection,
     where_clause: &str,
@@ -218,10 +181,9 @@ fn list_where(
          FROM tasks WHERE {where_clause} ORDER BY {order_by}"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mut tasks: Vec<Task> = stmt
+    let tasks: Vec<Task> = stmt
         .query_map(query_params, row_to_task)?
         .collect::<Result<_, _>>()?;
-    attach_tags(conn, &mut tasks)?;
     Ok(tasks)
 }
 
@@ -256,41 +218,8 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         completed_at: row.get(7)?,
         created_at: row.get(8)?,
         estimated_minutes: row.get(9)?,
-        tags: Vec::new(),
         recurrence,
     })
-}
-
-fn attach_tags(conn: &Connection, tasks: &mut [Task]) -> DbResult<()> {
-    if tasks.is_empty() {
-        return Ok(());
-    }
-    let placeholders = std::iter::repeat_n("?", tasks.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!("SELECT task_id, tag_id FROM task_tags WHERE task_id IN ({placeholders})");
-    let mut stmt = conn.prepare(&sql)?;
-    let ids: Vec<String> = tasks.iter().map(|t| t.id.0.to_string()).collect();
-    let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
-        let task_id: String = row.get(0)?;
-        let tag_id: String = row.get(1)?;
-        Ok((task_id, tag_id))
-    })?;
-
-    let mut by_task: std::collections::HashMap<String, Vec<TagId>> =
-        std::collections::HashMap::new();
-    for row in rows {
-        let (task_id, tag_id) = row?;
-        by_task.entry(task_id).or_default().push(TagId(
-            Uuid::parse_str(&tag_id).expect("tag_id column always holds a valid uuid"),
-        ));
-    }
-    for task in tasks.iter_mut() {
-        if let Some(tag_ids) = by_task.remove(&task.id.0.to_string()) {
-            task.tags = tag_ids;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -298,7 +227,6 @@ mod tests {
     use super::*;
     use crate::db;
     use crate::domain::project::Project;
-    use crate::domain::tag::Tag;
     use chrono::Duration;
 
     #[test]
@@ -418,35 +346,6 @@ mod tests {
         let completed = list_completed(&conn).unwrap();
         assert_eq!(completed.len(), 2);
         assert!(completed.iter().all(|t| t.completed_at.is_some()));
-    }
-
-    #[test]
-    fn tags_attach_and_detach() {
-        let conn = db::open_in_memory().unwrap();
-        let tag_a = Tag {
-            id: TagId::new(),
-            name: "work".to_string(),
-        };
-        let tag_b = Tag {
-            id: TagId::new(),
-            name: "home".to_string(),
-        };
-        db::tag_repo::create(&conn, &tag_a).unwrap();
-        db::tag_repo::create(&conn, &tag_b).unwrap();
-
-        let mut task = Task::new_inbox("tagged task");
-        task.tags = vec![tag_a.id, tag_b.id];
-        create(&conn, &task).unwrap();
-
-        let by_tag_a = list_by_tag(&conn, tag_a.id).unwrap();
-        assert_eq!(by_tag_a.len(), 1);
-        assert_eq!(by_tag_a[0].tags.len(), 2);
-
-        set_tags_for_task(&conn, task.id, &[tag_a.id]).unwrap();
-        let by_tag_b = list_by_tag(&conn, tag_b.id).unwrap();
-        assert!(by_tag_b.is_empty());
-        let by_tag_a = list_by_tag(&conn, tag_a.id).unwrap();
-        assert_eq!(by_tag_a.len(), 1);
     }
 
     #[test]
