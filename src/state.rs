@@ -20,7 +20,6 @@ pub enum Perspective {
     Overdue,
     Flagged,
     Completed,
-    AllProjects,
     Project(ProjectId),
     AllTags,
     Tag(TagId),
@@ -196,6 +195,9 @@ pub struct AppState {
     /// floating window rather than a permanent panel, so it never sits in the
     /// normal Tab order when closed.
     pub quick_capture_open: bool,
+    /// Whether the new-project popup is open (toggled by Cmd+Shift+N). Same
+    /// floating-window shape as `quick_capture_open`.
+    pub new_project_popup_open: bool,
     pub new_project_name: String,
     pub new_tag_name: String,
     pub project_picker: Option<ProjectPickerState>,
@@ -249,6 +251,7 @@ impl AppState {
             tag_edit_buffer: None,
             quick_entry_buffer: String::new(),
             quick_capture_open: false,
+            new_project_popup_open: false,
             new_project_name: String::new(),
             new_tag_name: String::new(),
             project_picker: None,
@@ -305,7 +308,6 @@ impl AppState {
             Perspective::Overdue,
             Perspective::Flagged,
             Perspective::Completed,
-            Perspective::AllProjects,
         ];
         entries.extend(self.projects.iter().map(|p| Perspective::Project(p.id)));
         entries.push(Perspective::AllTags);
@@ -363,7 +365,6 @@ impl AppState {
             Perspective::Overdue => task_repo::list_overdue(&self.conn, today),
             Perspective::Flagged => task_repo::list_flagged(&self.conn),
             Perspective::Completed => task_repo::list_completed(&self.conn),
-            Perspective::AllProjects => Ok(Vec::new()),
             Perspective::Project(id) => task_repo::list_by_project(&self.conn, id),
             Perspective::AllTags => Ok(Vec::new()),
             Perspective::Tag(id) => task_repo::list_by_tag(&self.conn, id),
@@ -1022,7 +1023,10 @@ impl AppState {
     /// Whether any keyboard-driven picker (project or due date) is currently
     /// open, so callers can avoid opening a second one on top of it.
     pub fn any_picker_open(&self) -> bool {
-        self.project_picker.is_some() || self.due_date_picker.is_some() || self.quick_capture_open
+        self.project_picker.is_some()
+            || self.due_date_picker.is_some()
+            || self.quick_capture_open
+            || self.new_project_popup_open
     }
 
     /// Opens the keyboard-driven due-date picker for the highlighted task,
@@ -1299,6 +1303,20 @@ impl AppState {
         }
         self.new_project_name.clear();
         self.refresh_projects();
+    }
+
+    pub fn open_new_project_popup(&mut self) {
+        self.new_project_popup_open = true;
+    }
+
+    pub fn close_new_project_popup(&mut self) {
+        self.new_project_popup_open = false;
+        self.new_project_name.clear();
+    }
+
+    pub fn submit_new_project_popup(&mut self) {
+        self.create_project();
+        self.new_project_popup_open = false;
     }
 
     pub fn save_project_edits(&mut self) {
@@ -2380,7 +2398,6 @@ mod tests {
                 Perspective::Overdue,
                 Perspective::Flagged,
                 Perspective::Completed,
-                Perspective::AllProjects,
                 Perspective::Project(project_id),
                 Perspective::AllTags,
                 Perspective::Tag(tag_id),

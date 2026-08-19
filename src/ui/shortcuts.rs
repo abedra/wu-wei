@@ -1,11 +1,16 @@
 use eframe::egui;
 
 use crate::state::{AppState, Perspective};
-use crate::ui::quick_capture;
+use crate::ui::{new_project, quick_capture};
 
 /// Global, OmniFocus-inspired keyboard shortcuts. Called once per frame, before
 /// any panel is drawn, so a shortcut fires regardless of which panel has focus.
 pub fn handle(ctx: &egui::Context, state: &mut AppState) {
+    // `consume_shortcut` ignores extra Shift/Alt modifiers when matching, so
+    // Cmd-Shift-N must be checked before the less-specific Cmd-N — otherwise
+    // Cmd-N would consume the keypress first and the new-project popup could
+    // never open (see egui's `InputState::consume_shortcut` docs).
+    handle_new_project_popup(ctx, state);
     handle_quick_capture(ctx, state);
     handle_project_picker(ctx, state);
     handle_due_date_picker(ctx, state);
@@ -65,14 +70,13 @@ fn handle_focus_sidebar(ctx: &egui::Context, state: &mut AppState) {
 }
 
 fn handle_perspective_switches(ctx: &egui::Context, state: &mut AppState) {
-    const PERSPECTIVE_KEYS: [(egui::Key, Perspective); 7] = [
+    const PERSPECTIVE_KEYS: [(egui::Key, Perspective); 6] = [
         (egui::Key::Num1, Perspective::Inbox),
-        (egui::Key::Num2, Perspective::AllProjects),
-        (egui::Key::Num3, Perspective::AllTags),
-        (egui::Key::Num4, Perspective::Today),
-        (egui::Key::Num5, Perspective::Flagged),
-        (egui::Key::Num6, Perspective::Completed),
-        (egui::Key::Num7, Perspective::Overdue),
+        (egui::Key::Num2, Perspective::AllTags),
+        (egui::Key::Num3, Perspective::Today),
+        (egui::Key::Num4, Perspective::Flagged),
+        (egui::Key::Num5, Perspective::Completed),
+        (egui::Key::Num6, Perspective::Overdue),
     ];
     for (key, perspective) in PERSPECTIVE_KEYS {
         let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, key);
@@ -108,6 +112,33 @@ fn handle_quick_capture(ctx: &egui::Context, state: &mut AppState) {
     if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
         state.open_quick_capture();
         ctx.memory_mut(|m| m.request_focus(quick_capture::field_id()));
+    }
+}
+
+/// Cmd+Shift+N pops open the new-project popup and focuses its field. Same
+/// open/submit/cancel shape as `handle_quick_capture`.
+fn handle_new_project_popup(ctx: &egui::Context, state: &mut AppState) {
+    if state.new_project_popup_open {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+            state.submit_new_project_popup();
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            state.close_new_project_popup();
+        }
+        return;
+    }
+
+    if state.project_picker.is_some() || state.due_date_picker.is_some() || state.quick_capture_open
+    {
+        return;
+    }
+    let shortcut = egui::KeyboardShortcut::new(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::N,
+    );
+    if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
+        state.open_new_project_popup();
+        ctx.memory_mut(|m| m.request_focus(new_project::field_id()));
     }
 }
 

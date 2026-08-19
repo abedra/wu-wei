@@ -22,17 +22,28 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     ui.add_space(8.0);
 
     let entries = state.sidebar_entries();
+    let mut shown_projects_label = false;
     for (index, perspective) in entries.iter().copied().enumerate() {
-        if perspective == Perspective::AllProjects {
+        if matches!(perspective, Perspective::Project(_)) && !shown_projects_label {
             section_label(ui, "Projects");
+            shown_projects_label = true;
         } else if perspective == Perspective::AllTags {
             section_label(ui, "Tags");
         }
 
         let label = label_for(state, perspective);
         let selected = state.perspective == perspective;
-        if ui.selectable_label(selected, label).clicked() {
+        let response = ui.selectable_label(selected, label);
+        if response.clicked() {
             state.focus_sidebar(index);
+        }
+        if let Perspective::Project(id) = perspective {
+            response.context_menu(|ui| {
+                if ui.button("Edit Project...").clicked() {
+                    state.select_project(id);
+                    ui.close();
+                }
+            });
         }
     }
 }
@@ -50,7 +61,6 @@ fn label_for(state: &AppState, perspective: Perspective) -> String {
         Perspective::Overdue => "Overdue".to_string(),
         Perspective::Flagged => "Flagged".to_string(),
         Perspective::Completed => "Completed".to_string(),
-        Perspective::AllProjects => "All Projects".to_string(),
         Perspective::Project(id) => state
             .projects
             .iter()

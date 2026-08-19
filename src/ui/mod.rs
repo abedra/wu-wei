@@ -1,5 +1,6 @@
 pub mod ai_chat;
 pub mod due_date_picker;
+pub mod new_project;
 pub mod project_picker;
 pub mod project_view;
 pub mod quick_capture;

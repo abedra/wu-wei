@@ -25,6 +25,7 @@ impl eframe::App for LoaApp {
         ui::project_picker::draw(&ctx, &mut self.state);
         ui::due_date_picker::draw(&ctx, &mut self.state);
         ui::quick_capture::draw(&ctx, &mut self.state);
+        ui::new_project::draw(&ctx, &mut self.state);
 
         egui::Panel::left("sidebar")
             .resizable(true)
@@ -64,7 +65,6 @@ impl eframe::App for LoaApp {
         }
 
         egui::CentralPanel::default().show(ui, |ui| match self.state.perspective {
-            Perspective::AllProjects => ui::project_view::draw_list(ui, &mut self.state),
             Perspective::AllTags => ui::tag_view::draw_list(ui, &mut self.state),
             _ => ui::task_list::draw(ui, &mut self.state),
         });

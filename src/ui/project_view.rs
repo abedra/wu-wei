@@ -1,35 +1,7 @@
 use eframe::egui;
 
-use crate::domain::project::{ProjectId, ProjectKind, ProjectStatus};
+use crate::domain::project::{ProjectKind, ProjectStatus};
 use crate::state::AppState;
-
-pub fn draw_list(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.heading("Projects");
-    ui.horizontal(|ui| {
-        let response = ui.text_edit_singleline(&mut state.new_project_name);
-        let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if (response.lost_focus() && enter_pressed) || ui.button("New Project").clicked() {
-            state.create_project();
-            response.request_focus();
-        }
-    });
-
-    ui.separator();
-
-    let mut to_select: Option<ProjectId> = None;
-    for project in &state.projects {
-        ui.horizontal(|ui| {
-            if ui.selectable_label(false, &project.name).clicked() {
-                to_select = Some(project.id);
-            }
-            ui.label(format!("[{}]", project.status.label()));
-            ui.label(format!("[{}]", project.kind.label()));
-        });
-    }
-    if let Some(id) = to_select {
-        state.select_project(id);
-    }
-}
 
 pub fn draw_detail(ui: &mut egui::Ui, state: &mut AppState) {
     if state.project_edit_buffer.is_none() {
