@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::Local;
 use eframe::egui;
 
 use crate::state::{self, AppState};
@@ -10,7 +10,7 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
     let Some(highlighted) = state.due_date_picker.as_ref().map(|p| p.highlighted) else {
         return;
     };
-    let options = state::due_date_picker_options(Utc::now().date_naive());
+    let options = state::due_date_picker_options(Local::now().date_naive());
 
     let mut clicked_index: Option<usize> = None;
     egui::Window::new("Set Due Date")

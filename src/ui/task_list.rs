@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::Local;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
@@ -23,7 +23,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     let mut to_toggle_complete: Option<(TaskId, bool)> = None;
     let mut to_toggle_flag: Option<(TaskId, bool)> = None;
     let mut to_select: Option<TaskId> = None;
-    let today = Utc::now().date_naive();
+    let today = Local::now().date_naive();
 
     TableBuilder::new(ui)
         .striped(true)

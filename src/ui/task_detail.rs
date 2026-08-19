@@ -30,7 +30,7 @@ fn recurrence_field(
         if ui.checkbox(&mut repeats, "Repeats every").changed() {
             *recurrence = if repeats {
                 if due_date.is_none() {
-                    *due_date = Some(chrono::Utc::now().date_naive());
+                    *due_date = Some(chrono::Local::now().date_naive());
                 }
                 Some(Recurrence {
                     interval: 1,
@@ -81,7 +81,7 @@ fn date_field(ui: &mut egui::Ui, label: &str, date: &mut Option<NaiveDate>) -> b
         let mut has_date = date.is_some();
         if ui.checkbox(&mut has_date, label).changed() {
             *date = if has_date {
-                Some(chrono::Utc::now().date_naive())
+                Some(chrono::Local::now().date_naive())
             } else {
                 None
             };

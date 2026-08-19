@@ -1,6 +1,6 @@
 use std::sync::mpsc::{Receiver, TryRecvError};
 
-use chrono::{Datelike, Duration, NaiveDate, Utc, Weekday};
+use chrono::{Datelike, Duration, Local, NaiveDate, Utc, Weekday};
 use rusqlite::Connection;
 
 use crate::db::error::DbResult;
@@ -356,7 +356,7 @@ impl AppState {
     }
 
     pub fn refresh_visible_tasks(&mut self) {
-        let today = Utc::now().date_naive();
+        let today = Local::now().date_naive();
         let result = match self.perspective {
             Perspective::Inbox => task_repo::list_inbox(&self.conn),
             Perspective::Today => task_repo::list_today(&self.conn, today),
@@ -435,7 +435,7 @@ impl AppState {
             return;
         }
         let context = PromptContext {
-            today: Utc::now().date_naive(),
+            today: Local::now().date_naive(),
             project_names: self.projects.iter().map(|p| p.name.clone()).collect(),
         };
         self.llm_pending = Some(llm::parse_capture_async(config, raw_text, context));
@@ -478,7 +478,7 @@ impl AppState {
         // today rather than leaving it invisible until edited by hand.
         task.due_date = parsed
             .due_date
-            .or_else(|| parsed.recurrence.map(|_| Utc::now().date_naive()));
+            .or_else(|| parsed.recurrence.map(|_| Local::now().date_naive()));
         task.flagged = parsed.flagged;
         task.recurrence = parsed.recurrence;
 
@@ -581,7 +581,7 @@ impl AppState {
             })
             .collect();
         ChatContext {
-            today: Utc::now().date_naive(),
+            today: Local::now().date_naive(),
             tasks,
             project_names: self.projects.iter().map(|p| p.name.clone()).collect(),
             tag_names: self.tags.iter().map(|t| t.name.clone()).collect(),
@@ -703,7 +703,7 @@ impl AppState {
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| "no task with that id".to_string())?;
                 if task.due_date.is_none() {
-                    task_repo::set_due_date(&self.conn, task_id, Some(Utc::now().date_naive()))
+                    task_repo::set_due_date(&self.conn, task_id, Some(Local::now().date_naive()))
                         .map_err(|e| e.to_string())?;
                 }
                 let unit = match recurrence.unit {
@@ -794,7 +794,7 @@ impl AppState {
                 // explicit date still needs one to show up anywhere.
                 task.due_date = parsed
                     .due_date
-                    .or_else(|| parsed.recurrence.map(|_| Utc::now().date_naive()));
+                    .or_else(|| parsed.recurrence.map(|_| Local::now().date_naive()));
                 task.flagged = parsed.flagged;
                 task.recurrence = parsed.recurrence;
                 if let Some(name) = &parsed.project {
@@ -1037,7 +1037,7 @@ impl AppState {
             .iter()
             .find(|t| t.id == task_id)
             .and_then(|t| t.due_date);
-        let options = due_date_picker_options(Utc::now().date_naive());
+        let options = due_date_picker_options(Local::now().date_naive());
         let highlighted = options
             .iter()
             .position(|(_, date)| *date == current_due)
@@ -1056,7 +1056,7 @@ impl AppState {
         let Some(picker) = &mut self.due_date_picker else {
             return;
         };
-        let max = due_date_picker_options(Utc::now().date_naive()).len() as i32 - 1;
+        let max = due_date_picker_options(Local::now().date_naive()).len() as i32 - 1;
         picker.highlighted = (picker.highlighted as i32 + delta).clamp(0, max) as usize;
     }
 
@@ -1077,7 +1077,7 @@ impl AppState {
     }
 
     fn apply_picked_due_date(&mut self, task_id: TaskId, index: usize) {
-        let options = due_date_picker_options(Utc::now().date_naive());
+        let options = due_date_picker_options(Local::now().date_naive());
         let Some((_, due_date)) = options.get(index) else {
             return;
         };
@@ -1264,7 +1264,7 @@ impl AppState {
         let completed_on = task
             .completed_at
             .map(|dt| dt.date_naive())
-            .unwrap_or_else(|| Utc::now().date_naive());
+            .unwrap_or_else(|| Local::now().date_naive());
 
         let mut next = Task::new_inbox(task.title);
         next.notes = task.notes;
@@ -1398,7 +1398,7 @@ mod tests {
     #[test]
     fn overdue_perspective_shows_only_strictly_past_due_tasks() {
         let mut state = AppState::new(crate::db::open_in_memory().unwrap());
-        let today = Utc::now().date_naive();
+        let today = Local::now().date_naive();
 
         state.quick_entry_buffer = "overdue item".to_string();
         state.quick_capture_submit();
@@ -1591,7 +1591,7 @@ mod tests {
         assert_eq!(state.visible_tasks.len(), 1);
         assert_eq!(
             state.visible_tasks[0].due_date,
-            Some(Utc::now().date_naive())
+            Some(Local::now().date_naive())
         );
         assert_eq!(
             state.visible_tasks[0].recurrence,
@@ -1608,7 +1608,7 @@ mod tests {
         state.quick_entry_buffer = "overdue task".to_string();
         state.quick_capture_submit();
         let task_id = state.visible_tasks[0].id;
-        let today = Utc::now().date_naive();
+        let today = Local::now().date_naive();
 
         state.apply_chat_reply(ChatReply {
             reply: "Rolled it to today.".to_string(),
@@ -1943,7 +1943,7 @@ mod tests {
             })
         );
         // A recurring task with no due date gets one so it actually shows up.
-        assert_eq!(task.due_date, Some(Utc::now().date_naive()));
+        assert_eq!(task.due_date, Some(Local::now().date_naive()));
         assert!(
             state.chat_history[0]
                 .content
@@ -1959,7 +1959,7 @@ mod tests {
         state.quick_entry_buffer = "Deep Lunge".to_string();
         state.quick_capture_submit();
         let task_id = state.visible_tasks[0].id;
-        let due = Utc::now().date_naive() + Duration::days(5);
+        let due = Local::now().date_naive() + Duration::days(5);
         state.select_task(task_id);
         state.task_edit_buffer.as_mut().unwrap().due_date = Some(due);
         state.save_task_edits();
@@ -2198,7 +2198,7 @@ mod tests {
         state.quick_entry_buffer = "overdue task".to_string();
         state.quick_capture_submit();
         let task_id = state.visible_tasks[0].id;
-        let today = Utc::now().date_naive();
+        let today = Local::now().date_naive();
 
         // Mirrors what a malformed model reply looks like once parsed: one
         // good action plus a note about the one the model got wrong,
@@ -2356,7 +2356,7 @@ mod tests {
         state.confirm_due_date_picker();
 
         assert!(state.due_date_picker.is_none());
-        let expected = Utc::now().date_naive() + Duration::days(1);
+        let expected = Local::now().date_naive() + Duration::days(1);
         let updated = task_repo::get(&state.conn, task_id).unwrap().unwrap();
         assert_eq!(updated.due_date, Some(expected));
     }
