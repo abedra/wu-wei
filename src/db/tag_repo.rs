@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
-use super::error::DbResult;
+use super::error::{DbError, DbResult};
 use crate::domain::tag::{Tag, TagId};
 
 pub fn create(conn: &Connection, tag: &Tag) -> DbResult<()> {
@@ -21,7 +21,10 @@ pub fn update(conn: &Connection, tag: &Tag) -> DbResult<()> {
 }
 
 pub fn delete(conn: &Connection, id: TagId) -> DbResult<()> {
-    conn.execute("DELETE FROM tags WHERE id = ?1", params![id.0.to_string()])?;
+    let rows = conn.execute("DELETE FROM tags WHERE id = ?1", params![id.0.to_string()])?;
+    if rows == 0 {
+        return Err(DbError::NotFound(format!("tag {}", id.0)));
+    }
     Ok(())
 }
 

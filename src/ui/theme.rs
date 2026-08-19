@@ -78,3 +78,12 @@ fn apply_to_style(style: &mut egui::Style) {
 pub fn sidebar_frame(style: &egui::Style) -> egui::Frame {
     egui::Frame::side_top_panel(style).fill(SIDEBAR)
 }
+
+/// A `Frame` for the AI chat panel: a top accent border plus a fill distinct
+/// from both the sidebar and central content, so it reads as its own
+/// full-width strip rather than an extension of the task list above it.
+pub fn chat_frame(style: &egui::Style) -> egui::Frame {
+    egui::Frame::side_top_panel(style)
+        .fill(SURFACE)
+        .stroke(egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.5)))
+}

@@ -7,8 +7,11 @@ use crate::db::error::DbResult;
 use crate::db::{project_repo, tag_repo, task_repo};
 use crate::domain::project::{Project, ProjectId, ProjectKind, ProjectStatus};
 use crate::domain::tag::{Tag, TagId};
-use crate::domain::task::{Recurrence, Task, TaskId};
-use crate::llm::{self, LlmConfig, ParsedTask, PromptContext};
+use crate::domain::task::{Recurrence, RecurrenceUnit, Task, TaskId};
+use crate::llm::{
+    self, ChatAction, ChatContext, ChatReply, ChatRole, ChatTaskSummary, ChatTurn, LlmConfig,
+    ParsedTask, PromptContext,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Perspective {
@@ -215,6 +218,20 @@ pub struct AppState {
     /// frame in `poll_llm`. Dropping it (e.g. on cancel) discards the reply.
     pub llm_pending: Option<Receiver<Result<ParsedTask, String>>>,
     pub llm_busy: bool,
+    /// The AI chat panel's conversation so far, shown in the transcript and
+    /// resent as context on every turn. Ephemeral — not persisted to the DB,
+    /// cleared on restart.
+    pub chat_history: Vec<ChatTurn>,
+    pub chat_input: String,
+    /// Set while a background chat request is in flight; polled once per
+    /// frame in `poll_chat`.
+    pub chat_pending: Option<Receiver<Result<ChatReply, String>>>,
+    pub chat_busy: bool,
+    /// Set by `poll_chat` when a request finishes (reply or error); consumed
+    /// by `ui::ai_chat::draw`, which requests keyboard focus back on the
+    /// input field and clears it, so the next message can be typed
+    /// immediately without reaching for the mouse.
+    pub chat_focus_requested: bool,
 }
 
 impl AppState {
@@ -242,6 +259,11 @@ impl AppState {
             llm_config: LlmConfig::from_env(),
             llm_pending: None,
             llm_busy: false,
+            chat_history: Vec::new(),
+            chat_input: String::new(),
+            chat_pending: None,
+            chat_busy: false,
+            chat_focus_requested: false,
         };
         state.refresh_projects();
         state.refresh_tags();
@@ -470,13 +492,7 @@ impl AppState {
             task.project_id = Some(id);
         }
 
-        let mut tag_ids = Vec::new();
-        for name in &parsed.tags {
-            match tag_repo::get_or_create_by_name(&self.conn, name) {
-                Ok(tag) => tag_ids.push(tag.id),
-                Err(e) => self.error_message = Some(e.to_string()),
-            }
-        }
+        let mut tag_ids = self.resolve_or_create_tag_ids(&parsed.tags);
         if let Perspective::Tag(id) = self.perspective
             && !tag_ids.contains(&id)
         {
@@ -492,6 +508,363 @@ impl AppState {
         self.quick_entry_buffer.clear();
         self.quick_capture_open = false;
         self.refresh_visible_tasks();
+    }
+
+    /// Gets-or-creates a tag id for each name, reporting (but not aborting
+    /// on) any individual lookup failure — shared by quick capture and the
+    /// AI chat's `create_task`/`add_tag` handling.
+    fn resolve_or_create_tag_ids(&mut self, names: &[String]) -> Vec<TagId> {
+        let mut tag_ids = Vec::new();
+        for name in names {
+            match tag_repo::get_or_create_by_name(&self.conn, name) {
+                Ok(tag) => tag_ids.push(tag.id),
+                Err(e) => self.error_message = Some(e.to_string()),
+            }
+        }
+        tag_ids
+    }
+
+    /// Sends the current chat input as a new user turn to the configured
+    /// LLM, along with the full set of open tasks so it can resolve
+    /// references like "the dentist task" and batch commands like "roll all
+    /// of my overdue tasks to today". With no provider configured, appends
+    /// an explanatory assistant message instead of starting a request.
+    pub fn chat_send(&mut self) {
+        let text = self.chat_input.trim().to_string();
+        if text.is_empty() || self.chat_busy {
+            return;
+        }
+        self.chat_input.clear();
+        self.chat_history.push(ChatTurn {
+            role: ChatRole::User,
+            content: text,
+        });
+
+        let Some(config) = self.llm_config.clone() else {
+            self.chat_history.push(ChatTurn {
+                role: ChatRole::Assistant,
+                content: "AI chat isn't configured — set LOA_LLM_API_KEY (or a \
+                          provider-specific key) to enable it."
+                    .to_string(),
+            });
+            return;
+        };
+
+        let context = self.build_chat_context();
+        self.chat_pending = Some(llm::send_chat_async(
+            config,
+            self.chat_history.clone(),
+            context,
+        ));
+        self.chat_busy = true;
+    }
+
+    fn build_chat_context(&self) -> ChatContext {
+        let open_tasks = task_repo::list_open(&self.conn).unwrap_or_default();
+        let tasks = open_tasks
+            .iter()
+            .map(|t| ChatTaskSummary {
+                id: t.id,
+                title: t.title.clone(),
+                project: t
+                    .project_id
+                    .and_then(|pid| self.projects.iter().find(|p| p.id == pid))
+                    .map(|p| p.name.clone()),
+                due_date: t.due_date,
+                flagged: t.flagged,
+                tags: t
+                    .tags
+                    .iter()
+                    .filter_map(|tid| self.tags.iter().find(|tag| tag.id == *tid))
+                    .map(|tag| tag.name.clone())
+                    .collect(),
+            })
+            .collect();
+        ChatContext {
+            today: Utc::now().date_naive(),
+            tasks,
+            project_names: self.projects.iter().map(|p| p.name.clone()).collect(),
+            tag_names: self.tags.iter().map(|t| t.name.clone()).collect(),
+        }
+    }
+
+    /// Polled once per frame from `app.rs`. Non-blocking: does nothing while
+    /// the background request is still running.
+    pub fn poll_chat(&mut self) {
+        let Some(rx) = &self.chat_pending else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(reply)) => {
+                self.chat_pending = None;
+                self.chat_busy = false;
+                self.chat_focus_requested = true;
+                self.apply_chat_reply(reply);
+            }
+            Ok(Err(e)) => {
+                self.chat_pending = None;
+                self.chat_busy = false;
+                self.chat_focus_requested = true;
+                self.chat_history.push(ChatTurn {
+                    role: ChatRole::Assistant,
+                    content: format!("Something went wrong: {e}"),
+                });
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.chat_pending = None;
+                self.chat_busy = false;
+                self.chat_focus_requested = true;
+            }
+        }
+    }
+
+    /// Executes every action the model requested, appends its reply (plus a
+    /// short note about any actions that failed) to the transcript, and
+    /// refreshes the cached task/tag/project lists once for the whole batch
+    /// rather than after each individual action.
+    fn apply_chat_reply(&mut self, reply: ChatReply) {
+        let mut done = Vec::new();
+        let mut failures = reply.parse_failures;
+        for action in reply.actions {
+            match self.apply_chat_action(action) {
+                Ok(description) => done.push(description),
+                Err(e) => failures.push(e),
+            }
+        }
+        let mut content = reply.reply;
+        if !done.is_empty() {
+            // Factual, independent of whatever the reply text above claims —
+            // the model's prose can describe an action it never actually
+            // included (see `failures` below for the ones it attempted but
+            // got wrong; this covers ones it didn't attempt at all).
+            content.push_str("\n\nActions taken: ");
+            content.push_str(&done.join("; "));
+            content.push('.');
+        }
+        if !failures.is_empty() {
+            // The reply text above may claim something happened that this
+            // list contradicts (the model describing an action it failed to
+            // fill in correctly) — say plainly that it didn't happen, rather
+            // than a bare parenthetical that reads as a footnote.
+            let prefix = if failures.len() == 1 {
+                "This didn't actually happen: "
+            } else {
+                "These didn't actually happen: "
+            };
+            content.push_str("\n\n⚠ ");
+            content.push_str(prefix);
+            content.push_str(&failures.join("; "));
+        }
+        self.chat_history.push(ChatTurn {
+            role: ChatRole::Assistant,
+            content,
+        });
+        self.refresh_visible_tasks();
+        self.refresh_tags();
+        self.refresh_projects();
+    }
+
+    fn task_title(&self, task_id: TaskId) -> Result<String, String> {
+        task_repo::get(&self.conn, task_id)
+            .map_err(|e| e.to_string())?
+            .map(|t| t.title)
+            .ok_or_else(|| "no task with that id".to_string())
+    }
+
+    /// Task deletion is deliberately excluded (see `ChatAction`'s doc
+    /// comment for why project deletion isn't held to the same bar). On
+    /// success, returns a short factual description for the "Actions taken"
+    /// summary in `apply_chat_reply` — ground truth independent of the
+    /// model's own reply text.
+    fn apply_chat_action(&mut self, action: ChatAction) -> Result<String, String> {
+        match action {
+            ChatAction::SetDueDate { task_id, due_date } => {
+                let title = self.task_title(task_id)?;
+                task_repo::set_due_date(&self.conn, task_id, Some(due_date))
+                    .map_err(|e| e.to_string())?;
+                Ok(format!("set the due date on \"{title}\" to {due_date}"))
+            }
+            ChatAction::ClearDueDate { task_id } => {
+                let title = self.task_title(task_id)?;
+                task_repo::set_due_date(&self.conn, task_id, None).map_err(|e| e.to_string())?;
+                Ok(format!("cleared the due date on \"{title}\""))
+            }
+            ChatAction::SetRecurrence {
+                task_id,
+                recurrence,
+            } => {
+                let title = self.task_title(task_id)?;
+                task_repo::set_recurrence(&self.conn, task_id, Some(recurrence))
+                    .map_err(|e| e.to_string())?;
+                // Same rule as create_task/quick capture: a recurring task
+                // with no due date still needs one to show up anywhere.
+                let task = task_repo::get(&self.conn, task_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "no task with that id".to_string())?;
+                if task.due_date.is_none() {
+                    task_repo::set_due_date(&self.conn, task_id, Some(Utc::now().date_naive()))
+                        .map_err(|e| e.to_string())?;
+                }
+                let unit = match recurrence.unit {
+                    RecurrenceUnit::Days => "day(s)",
+                    RecurrenceUnit::Weeks => "week(s)",
+                    RecurrenceUnit::Months => "month(s)",
+                };
+                Ok(format!(
+                    "set \"{title}\" to repeat every {} {unit}",
+                    recurrence.interval
+                ))
+            }
+            ChatAction::ClearRecurrence { task_id } => {
+                let title = self.task_title(task_id)?;
+                task_repo::set_recurrence(&self.conn, task_id, None).map_err(|e| e.to_string())?;
+                Ok(format!("stopped \"{title}\" from repeating"))
+            }
+            ChatAction::CompleteTask { task_id } => {
+                let title = self.task_title(task_id)?;
+                task_repo::set_completed(&self.conn, task_id, true).map_err(|e| e.to_string())?;
+                self.spawn_next_occurrence(task_id);
+                Ok(format!("completed \"{title}\""))
+            }
+            ChatAction::ReopenTask { task_id } => {
+                let title = self.task_title(task_id)?;
+                task_repo::set_completed(&self.conn, task_id, false).map_err(|e| e.to_string())?;
+                Ok(format!("reopened \"{title}\""))
+            }
+            ChatAction::FlagTask { task_id } => {
+                let title = self.task_title(task_id)?;
+                task_repo::set_flagged(&self.conn, task_id, true).map_err(|e| e.to_string())?;
+                Ok(format!("flagged \"{title}\""))
+            }
+            ChatAction::UnflagTask { task_id } => {
+                let title = self.task_title(task_id)?;
+                task_repo::set_flagged(&self.conn, task_id, false).map_err(|e| e.to_string())?;
+                Ok(format!("unflagged \"{title}\""))
+            }
+            ChatAction::MoveToProject { task_id, project } => {
+                let title = self.task_title(task_id)?;
+                let project_id = self
+                    .projects
+                    .iter()
+                    .find(|p| p.name.eq_ignore_ascii_case(&project))
+                    .map(|p| p.id)
+                    .ok_or_else(|| format!("no project named {project:?}"))?;
+                task_repo::set_project(&self.conn, task_id, Some(project_id))
+                    .map_err(|e| e.to_string())?;
+                Ok(format!("moved \"{title}\" to {project}"))
+            }
+            ChatAction::MoveToInbox { task_id } => {
+                let title = self.task_title(task_id)?;
+                task_repo::set_project(&self.conn, task_id, None).map_err(|e| e.to_string())?;
+                Ok(format!("moved \"{title}\" to Inbox"))
+            }
+            ChatAction::AddTag { task_id, tag } => {
+                let task = task_repo::get(&self.conn, task_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "no task with that id".to_string())?;
+                let tag_record =
+                    tag_repo::get_or_create_by_name(&self.conn, &tag).map_err(|e| e.to_string())?;
+                let mut tag_ids = task.tags;
+                if !tag_ids.contains(&tag_record.id) {
+                    tag_ids.push(tag_record.id);
+                }
+                task_repo::set_tags_for_task(&self.conn, task_id, &tag_ids)
+                    .map_err(|e| e.to_string())?;
+                Ok(format!("tagged \"{}\" with {tag}", task.title))
+            }
+            ChatAction::RemoveTag { task_id, tag } => {
+                let task = task_repo::get(&self.conn, task_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "no task with that id".to_string())?;
+                let tag_id = self
+                    .tags
+                    .iter()
+                    .find(|t| t.name.eq_ignore_ascii_case(&tag))
+                    .map(|t| t.id)
+                    .ok_or_else(|| format!("no tag named {tag:?}"))?;
+                let tag_ids: Vec<_> = task.tags.into_iter().filter(|id| *id != tag_id).collect();
+                task_repo::set_tags_for_task(&self.conn, task_id, &tag_ids)
+                    .map_err(|e| e.to_string())?;
+                Ok(format!("removed {tag} from \"{}\"", task.title))
+            }
+            ChatAction::CreateTask { task: parsed } => {
+                let mut task = Task::new_inbox(parsed.title.clone());
+                // Same defaulting as quick capture: a recurring task with no
+                // explicit date still needs one to show up anywhere.
+                task.due_date = parsed
+                    .due_date
+                    .or_else(|| parsed.recurrence.map(|_| Utc::now().date_naive()));
+                task.flagged = parsed.flagged;
+                task.recurrence = parsed.recurrence;
+                if let Some(name) = &parsed.project {
+                    task.project_id = self
+                        .projects
+                        .iter()
+                        .find(|p| p.name.eq_ignore_ascii_case(name))
+                        .map(|p| p.id);
+                }
+                task.tags = self.resolve_or_create_tag_ids(&parsed.tags);
+
+                task_repo::create(&self.conn, &task).map_err(|e| e.to_string())?;
+                self.refresh_tags();
+
+                let mut description = format!("created task \"{}\"", task.title);
+                if let Some(project_name) = task
+                    .project_id
+                    .and_then(|id| self.projects.iter().find(|p| p.id == id))
+                    .map(|p| p.name.clone())
+                {
+                    description.push_str(&format!(" in {project_name}"));
+                }
+                if let Some(due) = task.due_date {
+                    description.push_str(&format!(" due {due}"));
+                }
+                Ok(description)
+            }
+            ChatAction::CreateProject { name } => {
+                if self
+                    .projects
+                    .iter()
+                    .any(|p| p.name.eq_ignore_ascii_case(&name))
+                {
+                    return Err(format!("a project named {name:?} already exists"));
+                }
+                let project = Project::new(&name);
+                project_repo::create(&self.conn, &project).map_err(|e| e.to_string())?;
+                // Refreshed immediately (not just at the end of the batch)
+                // so a later action in the same reply — e.g. "create a
+                // Taxes project and move the W2 task into it" — can resolve
+                // the new project by name.
+                self.refresh_projects();
+                Ok(format!("created project \"{name}\""))
+            }
+            ChatAction::DeleteProject { project } => {
+                let project_id = self
+                    .projects
+                    .iter()
+                    .find(|p| p.name.eq_ignore_ascii_case(&project))
+                    .map(|p| p.id)
+                    .ok_or_else(|| format!("no project named {project:?}"))?;
+                self.delete_project_checked(project_id)?;
+                Ok(format!("deleted project \"{project}\""))
+            }
+            ChatAction::DeleteTag { tag } => {
+                let tag_id = self
+                    .tags
+                    .iter()
+                    .find(|t| t.name.eq_ignore_ascii_case(&tag))
+                    .map(|t| t.id)
+                    .ok_or_else(|| format!("no tag named {tag:?}"))?;
+                self.delete_tag_checked(tag_id)?;
+                Ok(format!("deleted tag \"{tag}\""))
+            }
+            ChatAction::DeleteTask { task_id } => {
+                let title = self.task_title(task_id)?;
+                self.delete_task_checked(task_id)?;
+                Ok(format!("deleted \"{title}\""))
+            }
+        }
     }
 
     pub fn select_task(&mut self, id: TaskId) {
@@ -730,21 +1103,35 @@ impl AppState {
     }
 
     pub fn delete_task(&mut self, id: TaskId) {
-        if let Err(e) = task_repo::delete(&self.conn, id) {
-            self.error_message = Some(e.to_string());
-            return;
+        if let Err(e) = self.delete_task_checked(id) {
+            self.error_message = Some(e);
         }
+    }
+
+    /// Core of `delete_task`, with the failure surfaced as a `Result`
+    /// instead of routed straight to `self.error_message` — used by the AI
+    /// chat panel, same as `delete_project_checked`/`delete_tag_checked`.
+    fn delete_task_checked(&mut self, id: TaskId) -> Result<(), String> {
+        task_repo::delete(&self.conn, id).map_err(|e| e.to_string())?;
         if self.selection == Selection::Task(id) {
             self.clear_selection();
         }
         self.refresh_visible_tasks();
+        Ok(())
     }
 
     pub fn delete_project(&mut self, id: ProjectId) {
-        if let Err(e) = project_repo::delete(&self.conn, id) {
-            self.error_message = Some(e.to_string());
-            return;
+        if let Err(e) = self.delete_project_checked(id) {
+            self.error_message = Some(e);
         }
+    }
+
+    /// Core of `delete_project`, with the failure surfaced as a `Result`
+    /// instead of routed straight to `self.error_message` — used by the AI
+    /// chat panel, which needs to know whether the deletion it just
+    /// described in its "actions taken" summary actually happened.
+    fn delete_project_checked(&mut self, id: ProjectId) -> Result<(), String> {
+        project_repo::delete(&self.conn, id).map_err(|e| e.to_string())?;
         self.refresh_projects();
         if self.perspective == Perspective::Project(id) {
             // The perspective we were viewing no longer exists; fall back to Inbox
@@ -758,13 +1145,20 @@ impl AppState {
             // which can change the current perspective's contents (e.g. viewing Inbox).
             self.refresh_visible_tasks();
         }
+        Ok(())
     }
 
     pub fn delete_tag(&mut self, id: TagId) {
-        if let Err(e) = tag_repo::delete(&self.conn, id) {
-            self.error_message = Some(e.to_string());
-            return;
+        if let Err(e) = self.delete_tag_checked(id) {
+            self.error_message = Some(e);
         }
+    }
+
+    /// Core of `delete_tag`, with the failure surfaced as a `Result` instead
+    /// of routed straight to `self.error_message` — used by the AI chat
+    /// panel, same as `delete_project_checked`.
+    fn delete_tag_checked(&mut self, id: TagId) -> Result<(), String> {
+        tag_repo::delete(&self.conn, id).map_err(|e| e.to_string())?;
         self.refresh_tags();
         if self.perspective == Perspective::Tag(id) {
             // The perspective we were viewing no longer exists; fall back to Inbox
@@ -776,6 +1170,7 @@ impl AppState {
             }
             self.refresh_visible_tasks();
         }
+        Ok(())
     }
 
     pub fn save_task_edits(&mut self) {
@@ -1205,6 +1600,629 @@ mod tests {
                 unit: RecurrenceUnit::Days,
             })
         );
+    }
+
+    #[test]
+    fn chat_action_set_due_date_updates_the_task_and_records_the_reply() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "overdue task".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        let today = Utc::now().date_naive();
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Rolled it to today.".to_string(),
+            actions: vec![ChatAction::SetDueDate {
+                task_id,
+                due_date: today,
+            }],
+            parse_failures: Vec::new(),
+        });
+
+        assert_eq!(state.chat_history.len(), 1);
+        assert_eq!(state.chat_history[0].role, ChatRole::Assistant);
+        assert!(
+            state.chat_history[0]
+                .content
+                .starts_with("Rolled it to today.")
+        );
+        assert!(
+            state.chat_history[0]
+                .content
+                .contains("set the due date on \"overdue task\"")
+        );
+
+        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert_eq!(task.due_date, Some(today));
+    }
+
+    #[test]
+    fn chat_action_move_to_project_resolves_by_name_case_insensitively() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.new_project_name = "Kitchen Remodel".to_string();
+        state.create_project();
+        let project_id = state.projects[0].id;
+
+        state.quick_entry_buffer = "pick tile".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Moved it.".to_string(),
+            actions: vec![ChatAction::MoveToProject {
+                task_id,
+                project: "kitchen remodel".to_string(),
+            }],
+            parse_failures: Vec::new(),
+        });
+
+        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert_eq!(task.project_id, Some(project_id));
+    }
+
+    #[test]
+    fn chat_action_unknown_project_reports_a_failure_without_crashing() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "pick tile".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Moved it.".to_string(),
+            actions: vec![ChatAction::MoveToProject {
+                task_id,
+                project: "Nonexistent".to_string(),
+            }],
+            parse_failures: Vec::new(),
+        });
+
+        assert!(state.chat_history[0].content.contains("no project named"));
+        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert!(task.project_id.is_none());
+    }
+
+    #[test]
+    fn chat_action_complete_task_spawns_next_occurrence_for_recurring_tasks() {
+        use crate::domain::task::RecurrenceUnit;
+
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "daily task".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        state.select_task(task_id);
+        state.task_edit_buffer.as_mut().unwrap().recurrence = Some(Recurrence {
+            interval: 1,
+            unit: RecurrenceUnit::Days,
+        });
+        state.save_task_edits();
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Done.".to_string(),
+            actions: vec![ChatAction::CompleteTask { task_id }],
+            parse_failures: Vec::new(),
+        });
+
+        let all = task_repo::list_all(&state.conn).unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn chat_action_add_tag_creates_and_reuses_tags() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "buy stamps".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Tagged.".to_string(),
+            actions: vec![ChatAction::AddTag {
+                task_id,
+                tag: "errand".to_string(),
+            }],
+            parse_failures: Vec::new(),
+        });
+
+        assert_eq!(state.tags.len(), 1);
+        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert_eq!(task.tags, vec![state.tags[0].id]);
+    }
+
+    #[test]
+    fn chat_action_remove_tag_leaves_other_tags_on_the_task_intact() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "buy stamps".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Tagged.".to_string(),
+            actions: vec![
+                ChatAction::AddTag {
+                    task_id,
+                    tag: "errand".to_string(),
+                },
+                ChatAction::AddTag {
+                    task_id,
+                    tag: "urgent".to_string(),
+                },
+            ],
+            parse_failures: Vec::new(),
+        });
+        assert_eq!(state.tags.len(), 2);
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Removed.".to_string(),
+            actions: vec![ChatAction::RemoveTag {
+                task_id,
+                tag: "errand".to_string(),
+            }],
+            parse_failures: Vec::new(),
+        });
+
+        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        let urgent_id = state.tags.iter().find(|t| t.name == "urgent").unwrap().id;
+        assert_eq!(task.tags, vec![urgent_id]);
+        // The tag itself still exists — only its link to this task was removed.
+        assert_eq!(state.tags.len(), 2);
+    }
+
+    #[test]
+    fn chat_action_delete_tag_removes_it_from_every_task_that_had_it() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "buy stamps".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Tagged.".to_string(),
+            actions: vec![ChatAction::AddTag {
+                task_id,
+                tag: "errand".to_string(),
+            }],
+            parse_failures: Vec::new(),
+        });
+        assert_eq!(state.tags.len(), 1);
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Deleted the errand tag.".to_string(),
+            actions: vec![ChatAction::DeleteTag {
+                tag: "errand".to_string(),
+            }],
+            parse_failures: Vec::new(),
+        });
+
+        assert!(state.tags.is_empty());
+        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert!(task.tags.is_empty());
+    }
+
+    #[test]
+    fn chat_action_delete_tag_reports_an_unknown_tag_without_crashing() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Deleted it.".to_string(),
+            actions: vec![ChatAction::DeleteTag {
+                tag: "Nonexistent".to_string(),
+            }],
+            parse_failures: Vec::new(),
+        });
+
+        assert!(
+            state.chat_history[0]
+                .content
+                .contains("no tag named \"Nonexistent\"")
+        );
+    }
+
+    #[test]
+    fn chat_action_delete_task_removes_it() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "obsolete task".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Deleted it.".to_string(),
+            actions: vec![ChatAction::DeleteTask { task_id }],
+            parse_failures: Vec::new(),
+        });
+
+        assert!(task_repo::get(&state.conn, task_id).unwrap().is_none());
+        assert!(
+            state.chat_history[0]
+                .content
+                .contains("deleted \"obsolete task\"")
+        );
+    }
+
+    #[test]
+    fn chat_action_create_task_creates_a_recurring_task_in_a_project() {
+        use crate::domain::task::RecurrenceUnit;
+        use crate::llm::ParsedTask;
+
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.new_project_name = "Habits".to_string();
+        state.create_project();
+        let project_id = state.projects[0].id;
+        let due = chrono::NaiveDate::from_ymd_opt(2026, 8, 23).unwrap();
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Added it.".to_string(),
+            actions: vec![ChatAction::CreateTask {
+                task: ParsedTask {
+                    title: "Review Rocket Money".to_string(),
+                    due_date: Some(due),
+                    tags: vec![],
+                    project: Some("Habits".to_string()),
+                    flagged: false,
+                    recurrence: Some(Recurrence {
+                        interval: 1,
+                        unit: RecurrenceUnit::Weeks,
+                    }),
+                },
+            }],
+            parse_failures: Vec::new(),
+        });
+
+        state.set_perspective(Perspective::Project(project_id));
+        assert_eq!(state.visible_tasks.len(), 1);
+        let task = &state.visible_tasks[0];
+        assert_eq!(task.title, "Review Rocket Money");
+        assert_eq!(task.due_date, Some(due));
+        assert_eq!(
+            task.recurrence,
+            Some(Recurrence {
+                interval: 1,
+                unit: RecurrenceUnit::Weeks,
+            })
+        );
+        assert!(state.chat_history.iter().any(|t| {
+            t.content
+                .contains("created task \"Review Rocket Money\" in Habits")
+        }));
+    }
+
+    #[test]
+    fn chat_action_create_task_ignores_an_unknown_project_and_files_to_inbox() {
+        use crate::llm::ParsedTask;
+
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Added it.".to_string(),
+            actions: vec![ChatAction::CreateTask {
+                task: ParsedTask {
+                    title: "buy milk".to_string(),
+                    due_date: None,
+                    tags: vec![],
+                    project: Some("Nonexistent".to_string()),
+                    flagged: false,
+                    recurrence: None,
+                },
+            }],
+            parse_failures: Vec::new(),
+        });
+
+        assert_eq!(state.visible_tasks.len(), 1);
+        assert!(state.visible_tasks[0].project_id.is_none());
+    }
+
+    #[test]
+    fn chat_action_set_recurrence_fixes_a_task_that_was_created_without_it() {
+        use crate::domain::task::RecurrenceUnit;
+
+        // Reproduces the reported scenario: a task exists (e.g. created
+        // earlier without recurrence because the model left that optional
+        // field empty) and the user asks the assistant to make it recur.
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "Deep Lunge".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        assert!(state.visible_tasks[0].recurrence.is_none());
+        assert!(state.visible_tasks[0].due_date.is_none());
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Done.".to_string(),
+            actions: vec![ChatAction::SetRecurrence {
+                task_id,
+                recurrence: Recurrence {
+                    interval: 3,
+                    unit: RecurrenceUnit::Days,
+                },
+            }],
+            parse_failures: Vec::new(),
+        });
+
+        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert_eq!(
+            task.recurrence,
+            Some(Recurrence {
+                interval: 3,
+                unit: RecurrenceUnit::Days,
+            })
+        );
+        // A recurring task with no due date gets one so it actually shows up.
+        assert_eq!(task.due_date, Some(Utc::now().date_naive()));
+        assert!(
+            state.chat_history[0]
+                .content
+                .contains("set \"Deep Lunge\" to repeat every 3 day(s)")
+        );
+    }
+
+    #[test]
+    fn chat_action_set_recurrence_keeps_an_existing_due_date() {
+        use crate::domain::task::RecurrenceUnit;
+
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "Deep Lunge".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        let due = Utc::now().date_naive() + Duration::days(5);
+        state.select_task(task_id);
+        state.task_edit_buffer.as_mut().unwrap().due_date = Some(due);
+        state.save_task_edits();
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Done.".to_string(),
+            actions: vec![ChatAction::SetRecurrence {
+                task_id,
+                recurrence: Recurrence {
+                    interval: 1,
+                    unit: RecurrenceUnit::Weeks,
+                },
+            }],
+            parse_failures: Vec::new(),
+        });
+
+        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert_eq!(task.due_date, Some(due));
+    }
+
+    #[test]
+    fn chat_action_clear_recurrence_stops_a_task_from_repeating_but_keeps_its_due_date() {
+        use crate::domain::task::RecurrenceUnit;
+
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "Deep Lunge".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        state.select_task(task_id);
+        state.task_edit_buffer.as_mut().unwrap().recurrence = Some(Recurrence {
+            interval: 1,
+            unit: RecurrenceUnit::Days,
+        });
+        state.save_task_edits();
+        let due = task_repo::get(&state.conn, task_id)
+            .unwrap()
+            .unwrap()
+            .due_date;
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Done.".to_string(),
+            actions: vec![ChatAction::ClearRecurrence { task_id }],
+            parse_failures: Vec::new(),
+        });
+
+        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert!(task.recurrence.is_none());
+        assert_eq!(task.due_date, due);
+    }
+
+    #[test]
+    fn poll_chat_requests_focus_back_on_the_input_when_a_reply_arrives() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Ok(ChatReply {
+            reply: "Done.".to_string(),
+            actions: Vec::new(),
+            parse_failures: Vec::new(),
+        }))
+        .unwrap();
+        state.chat_pending = Some(rx);
+        state.chat_busy = true;
+
+        state.poll_chat();
+
+        assert!(!state.chat_busy);
+        assert!(state.chat_focus_requested);
+    }
+
+    #[test]
+    fn poll_chat_requests_focus_back_on_the_input_even_on_error() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Err("network error".to_string())).unwrap();
+        state.chat_pending = Some(rx);
+        state.chat_busy = true;
+
+        state.poll_chat();
+
+        assert!(!state.chat_busy);
+        assert!(state.chat_focus_requested);
+    }
+
+    #[test]
+    fn chat_send_without_config_appends_an_explanatory_message() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.llm_config = None;
+        state.chat_input = "roll overdue tasks to today".to_string();
+        state.chat_send();
+
+        assert_eq!(state.chat_history.len(), 2);
+        assert_eq!(state.chat_history[0].role, ChatRole::User);
+        assert_eq!(state.chat_history[1].role, ChatRole::Assistant);
+        assert!(state.chat_history[1].content.contains("isn't configured"));
+        assert!(state.chat_input.is_empty());
+        assert!(state.chat_pending.is_none());
+    }
+
+    #[test]
+    fn chat_action_create_project_makes_it_immediately_available_to_later_actions() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "file W2".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Created Taxes and filed it there.".to_string(),
+            actions: vec![
+                ChatAction::CreateProject {
+                    name: "Taxes".to_string(),
+                },
+                ChatAction::MoveToProject {
+                    task_id,
+                    project: "Taxes".to_string(),
+                },
+            ],
+            parse_failures: Vec::new(),
+        });
+
+        assert_eq!(state.projects.len(), 1);
+        assert_eq!(state.projects[0].name, "Taxes");
+        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert_eq!(task.project_id, Some(state.projects[0].id));
+    }
+
+    #[test]
+    fn chat_action_create_project_refuses_a_duplicate_name() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.new_project_name = "Taxes".to_string();
+        state.create_project();
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Done.".to_string(),
+            actions: vec![ChatAction::CreateProject {
+                name: "taxes".to_string(),
+            }],
+            parse_failures: Vec::new(),
+        });
+
+        assert_eq!(state.projects.len(), 1);
+        assert!(state.chat_history[0].content.contains("already exists"));
+    }
+
+    #[test]
+    fn chat_action_delete_project_unfiles_its_tasks_instead_of_deleting_them() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.new_project_name = "Taxes".to_string();
+        state.create_project();
+        let project_id = state.projects[0].id;
+
+        state.set_perspective(Perspective::Project(project_id));
+        state.quick_entry_buffer = "file W2".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        state.set_perspective(Perspective::Inbox);
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Deleted Taxes.".to_string(),
+            actions: vec![ChatAction::DeleteProject {
+                project: "Taxes".to_string(),
+            }],
+            parse_failures: Vec::new(),
+        });
+
+        assert!(state.projects.is_empty());
+        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert!(task.project_id.is_none());
+    }
+
+    #[test]
+    fn actions_taken_summary_reflects_only_what_was_actually_attempted() {
+        // Reproduces a real failure mode: the model's reply text narrates a
+        // project deletion it never actually included an action for — only
+        // an unrelated, real action (completing a task) was sent. There's
+        // nothing to fail here (no malformed or missing-field action), so
+        // the only way the user can tell the deletion never happened is the
+        // factual "Actions taken" summary, independent of the reply text.
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.new_project_name = "Recurring".to_string();
+        state.create_project();
+        let project_id = state.projects[0].id;
+
+        state.set_perspective(Perspective::Project(project_id));
+        state.quick_entry_buffer = "Read".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        state.set_perspective(Perspective::Inbox);
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Deleted project 'Recurring' and moved its tasks to Inbox.".to_string(),
+            actions: vec![ChatAction::CompleteTask { task_id }],
+            parse_failures: Vec::new(),
+        });
+
+        assert_eq!(state.projects.len(), 1);
+        assert_eq!(state.projects[0].name, "Recurring");
+        assert!(
+            state.chat_history[0]
+                .content
+                .contains("Actions taken: completed \"Read\".")
+        );
+    }
+
+    #[test]
+    fn a_real_deletion_failure_is_reported_instead_of_claimed_as_success() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.new_project_name = "Taxes".to_string();
+        state.create_project();
+        let project_id = state.projects[0].id;
+
+        // Delete the project out from under the chat action so
+        // `project_repo::delete` genuinely fails (0 rows affected is fine
+        // for DELETE, so force a real error via a closed-out id instead:
+        // simplest is to already not exist in the DB while still being in
+        // the in-memory cache the chat handler resolves names against).
+        project_repo::delete(&state.conn, project_id).unwrap();
+
+        state.apply_chat_reply(ChatReply {
+            reply: "Deleted Taxes.".to_string(),
+            actions: vec![ChatAction::DeleteProject {
+                project: "Taxes".to_string(),
+            }],
+            parse_failures: Vec::new(),
+        });
+
+        assert!(
+            !state.chat_history[0]
+                .content
+                .contains("Actions taken: deleted")
+        );
+    }
+
+    #[test]
+    fn a_malformed_action_is_noted_without_dropping_the_reply_or_other_actions() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "overdue task".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        let today = Utc::now().date_naive();
+
+        // Mirrors what a malformed model reply looks like once parsed: one
+        // good action plus a note about the one the model got wrong,
+        // instead of the whole turn being replaced by a bare error.
+        state.apply_chat_reply(ChatReply {
+            reply: "Rolled it to today.".to_string(),
+            actions: vec![ChatAction::SetDueDate {
+                task_id,
+                due_date: today,
+            }],
+            parse_failures: vec![
+                "model's \"create_project\" action is missing a project".to_string(),
+            ],
+        });
+
+        assert_eq!(state.chat_history.len(), 1);
+        assert!(
+            state.chat_history[0]
+                .content
+                .starts_with("Rolled it to today.")
+        );
+        assert!(state.chat_history[0].content.contains("missing a project"));
+        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert_eq!(task.due_date, Some(today));
     }
 
     #[test]

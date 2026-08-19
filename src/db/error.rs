@@ -6,6 +6,8 @@ pub enum DbError {
     InvalidUuid(#[from] uuid::Error),
     #[error("invalid enum value stored in database: {0}")]
     InvalidEnumValue(String),
+    #[error("no row found for {0}")]
+    NotFound(String),
 }
 
 pub type DbResult<T> = Result<T, DbError>;

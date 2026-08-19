@@ -35,10 +35,13 @@ pub fn update(conn: &Connection, project: &Project) -> DbResult<()> {
 }
 
 pub fn delete(conn: &Connection, id: ProjectId) -> DbResult<()> {
-    conn.execute(
+    let rows = conn.execute(
         "DELETE FROM projects WHERE id = ?1",
         params![id.0.to_string()],
     )?;
+    if rows == 0 {
+        return Err(DbError::NotFound(format!("project {}", id.0)));
+    }
     Ok(())
 }
 

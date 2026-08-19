@@ -2,7 +2,7 @@ use chrono::{NaiveDate, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
-use super::error::DbResult;
+use super::error::{DbError, DbResult};
 use crate::domain::project::ProjectId;
 use crate::domain::tag::TagId;
 use crate::domain::task::{Recurrence, RecurrenceUnit, Task, TaskId};
@@ -60,7 +60,10 @@ pub fn update(conn: &Connection, task: &Task) -> DbResult<()> {
 }
 
 pub fn delete(conn: &Connection, id: TaskId) -> DbResult<()> {
-    conn.execute("DELETE FROM tasks WHERE id = ?1", params![id.0.to_string()])?;
+    let rows = conn.execute("DELETE FROM tasks WHERE id = ?1", params![id.0.to_string()])?;
+    if rows == 0 {
+        return Err(DbError::NotFound(format!("task {}", id.0)));
+    }
     Ok(())
 }
 
@@ -167,6 +170,44 @@ pub fn set_flagged(conn: &Connection, id: TaskId, flagged: bool) -> DbResult<()>
         params![id.0.to_string(), flagged],
     )?;
     Ok(())
+}
+
+pub fn set_due_date(conn: &Connection, id: TaskId, due_date: Option<NaiveDate>) -> DbResult<()> {
+    conn.execute(
+        "UPDATE tasks SET due_date = ?2 WHERE id = ?1",
+        params![id.0.to_string(), due_date],
+    )?;
+    Ok(())
+}
+
+pub fn set_project(conn: &Connection, id: TaskId, project_id: Option<ProjectId>) -> DbResult<()> {
+    conn.execute(
+        "UPDATE tasks SET project_id = ?2 WHERE id = ?1",
+        params![id.0.to_string(), project_id.map(|p| p.0.to_string())],
+    )?;
+    Ok(())
+}
+
+pub fn set_recurrence(
+    conn: &Connection,
+    id: TaskId,
+    recurrence: Option<Recurrence>,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE tasks SET recurrence_interval = ?2, recurrence_unit = ?3 WHERE id = ?1",
+        params![
+            id.0.to_string(),
+            recurrence.map(|r| r.interval),
+            recurrence.map(|r| r.unit.as_str()),
+        ],
+    )?;
+    Ok(())
+}
+
+/// All not-yet-completed tasks, regardless of perspective — the working set
+/// an AI chat command can reference by id (see `crate::llm::ChatContext`).
+pub fn list_open(conn: &Connection) -> DbResult<Vec<Task>> {
+    list_where(conn, "completed = 0", params![], "created_at")
 }
 
 pub fn set_tags_for_task(conn: &Connection, task_id: TaskId, tag_ids: &[TagId]) -> DbResult<()> {
@@ -300,6 +341,45 @@ mod tests {
 
         delete(&conn, task.id).unwrap();
         assert!(get(&conn, task.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn set_due_date_and_set_project_update_only_that_field() {
+        let conn = db::open_in_memory().unwrap();
+        let project = Project::new("Errands");
+        db::project_repo::create(&conn, &project).unwrap();
+
+        let task = Task::new_inbox("call the bank");
+        create(&conn, &task).unwrap();
+
+        let due = Utc::now().date_naive();
+        set_due_date(&conn, task.id, Some(due)).unwrap();
+        let fetched = get(&conn, task.id).unwrap().unwrap();
+        assert_eq!(fetched.due_date, Some(due));
+        assert_eq!(fetched.title, "call the bank");
+
+        set_project(&conn, task.id, Some(project.id)).unwrap();
+        let fetched = get(&conn, task.id).unwrap().unwrap();
+        assert_eq!(fetched.project_id, Some(project.id));
+        assert_eq!(fetched.due_date, Some(due));
+
+        set_project(&conn, task.id, None).unwrap();
+        let fetched = get(&conn, task.id).unwrap().unwrap();
+        assert!(fetched.project_id.is_none());
+    }
+
+    #[test]
+    fn list_open_excludes_completed() {
+        let conn = db::open_in_memory().unwrap();
+        let open_task = Task::new_inbox("open");
+        create(&conn, &open_task).unwrap();
+        let mut done_task = Task::new_inbox("done");
+        done_task.completed = true;
+        create(&conn, &done_task).unwrap();
+
+        let open = list_open(&conn).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].title, "open");
     }
 
     #[test]

@@ -20,6 +20,7 @@ impl eframe::App for LoaApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.state.poll_llm();
+        self.state.poll_chat();
         ui::shortcuts::handle(&ctx, &mut self.state);
         ui::project_picker::draw(&ctx, &mut self.state);
         ui::due_date_picker::draw(&ctx, &mut self.state);
@@ -44,6 +45,12 @@ impl eframe::App for LoaApp {
                     }
                 });
         }
+
+        egui::Panel::bottom("ai_chat")
+            .resizable(true)
+            .default_size(180.0)
+            .frame(ui::theme::chat_frame(ui.style()))
+            .show(ui, |ui| ui::ai_chat::draw(ui, &mut self.state));
 
         if let Some(msg) = self.state.error_message.clone() {
             egui::Panel::bottom("error_bar").show(ui, |ui| {

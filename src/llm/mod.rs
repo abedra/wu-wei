@@ -7,11 +7,11 @@ use std::thread;
 
 use chrono::NaiveDate;
 
-use crate::domain::task::Recurrence;
+use crate::domain::task::{Recurrence, TaskId};
 
 /// A task as extracted from free text by an LLM, before it's turned into a
 /// real [`crate::domain::task::Task`] (which needs project/tag IDs, not names).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedTask {
     pub title: String,
     pub due_date: Option<NaiveDate>,
@@ -28,11 +28,123 @@ pub struct PromptContext {
     pub project_names: Vec<String>,
 }
 
+/// One turn in the AI chat panel's conversation history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatRole {
+    User,
+    Assistant,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChatTurn {
+    pub role: ChatRole,
+    pub content: String,
+}
+
+/// A task summary handed to the model as the working set it can act on —
+/// deliberately just enough to reference and reason about a task, not a full
+/// `Task` (no notes/timestamps/estimated_minutes).
+pub struct ChatTaskSummary {
+    pub id: TaskId,
+    pub title: String,
+    pub project: Option<String>,
+    pub due_date: Option<NaiveDate>,
+    pub flagged: bool,
+    pub tags: Vec<String>,
+}
+
+pub struct ChatContext {
+    pub today: NaiveDate,
+    pub tasks: Vec<ChatTaskSummary>,
+    pub project_names: Vec<String>,
+    pub tag_names: Vec<String>,
+}
+
+/// A single database mutation the model asked for, already validated (task
+/// id parses, action name recognized). DeleteTask/DeleteProject/DeleteTag
+/// are all genuinely irreversible from the UI (no undo) — the "Actions
+/// taken"/"This didn't actually happen" reporting in
+/// `AppState::apply_chat_reply` is what keeps them honest, not restraint on
+/// which actions exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatAction {
+    SetDueDate {
+        task_id: TaskId,
+        due_date: NaiveDate,
+    },
+    ClearDueDate {
+        task_id: TaskId,
+    },
+    SetRecurrence {
+        task_id: TaskId,
+        recurrence: Recurrence,
+    },
+    ClearRecurrence {
+        task_id: TaskId,
+    },
+    CompleteTask {
+        task_id: TaskId,
+    },
+    ReopenTask {
+        task_id: TaskId,
+    },
+    FlagTask {
+        task_id: TaskId,
+    },
+    UnflagTask {
+        task_id: TaskId,
+    },
+    MoveToProject {
+        task_id: TaskId,
+        project: String,
+    },
+    MoveToInbox {
+        task_id: TaskId,
+    },
+    AddTag {
+        task_id: TaskId,
+        tag: String,
+    },
+    RemoveTag {
+        task_id: TaskId,
+        tag: String,
+    },
+    CreateTask {
+        task: ParsedTask,
+    },
+    CreateProject {
+        name: String,
+    },
+    DeleteProject {
+        project: String,
+    },
+    DeleteTag {
+        tag: String,
+    },
+    DeleteTask {
+        task_id: TaskId,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ChatReply {
+    pub reply: String,
+    pub actions: Vec<ChatAction>,
+    /// Actions the model returned that couldn't be understood (unknown
+    /// type, missing a required field, unparsable id/date, ...). Reported
+    /// back to the user alongside `reply` rather than discarding the whole
+    /// turn — one malformed action shouldn't cost the reply text or the
+    /// other, valid actions in the same response.
+    pub parse_failures: Vec<String>,
+}
+
 /// Implemented once per LLM backend. Blocking by design: callers only ever
-/// run it on a background thread (see [`parse_capture_async`]), keeping the
-/// egui loop and the synchronous `db` layer untouched.
+/// run it on a background thread (see [`parse_capture_async`]/
+/// [`send_chat_async`]), keeping the egui loop and the synchronous `db`
+/// layer untouched.
 trait Provider: Send {
     fn parse(&self, raw_text: &str, context: &PromptContext) -> Result<ParsedTask, String>;
+    fn chat(&self, history: &[ChatTurn], context: &ChatContext) -> Result<ChatReply, String>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +219,24 @@ pub fn parse_capture_async(
     thread::spawn(move || {
         let provider = config.build_provider();
         let result = provider.parse(&raw_text, &context);
+        let _ = tx.send(result);
+    });
+    rx
+}
+
+/// Spawns a background thread that sends the chat panel's conversation
+/// history (ending with the newest user turn) to the configured LLM, and
+/// delivers its reply plus any requested task actions over the returned
+/// channel. Polled once per frame, same as [`parse_capture_async`].
+pub fn send_chat_async(
+    config: LlmConfig,
+    history: Vec<ChatTurn>,
+    context: ChatContext,
+) -> Receiver<Result<ChatReply, String>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let provider = config.build_provider();
+        let result = provider.chat(&history, &context);
         let _ = tx.send(result);
     });
     rx
