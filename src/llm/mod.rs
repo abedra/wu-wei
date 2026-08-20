@@ -2,6 +2,7 @@ mod anthropic;
 mod openai;
 mod prompt;
 
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
@@ -140,18 +141,27 @@ pub struct LlmConfig {
 }
 
 impl LlmConfig {
-    /// Reads provider selection and credentials from the environment.
-    /// Returns `None` when no API key is configured — AI-assisted capture is
-    /// opt-in and simply unavailable (not an error) until the user sets it up.
+    /// Resolves provider selection and credentials, preferring a value saved
+    /// in `settings` (the Settings screen — see `ui::settings`/
+    /// `AppState::save_settings`) over the matching environment variable,
+    /// over the provider's own default. Returns `None` when no API key is
+    /// available from either source: AI-assisted capture is opt-in and
+    /// simply unavailable (not an error) until set up.
     ///
-    /// - `WU_WEI_LLM_PROVIDER` — `openai` (default) or `anthropic`.
-    /// - `WU_WEI_LLM_API_KEY` — overrides the provider-specific env var below.
-    /// - `WU_WEI_LLM_BASE_URL` — overrides the provider default (e.g. to point
-    ///   the OpenAI-compatible client at a local server).
-    /// - `WU_WEI_LLM_MODEL` — overrides the provider default model.
-    pub fn from_env() -> Option<Self> {
-        let provider = match std::env::var("WU_WEI_LLM_PROVIDER").as_deref() {
-            Ok("anthropic") => ProviderKind::Anthropic,
+    /// `settings` keys: `llm_provider` (`openai`/`anthropic`), `llm_api_key`,
+    /// `llm_base_url`, `llm_model` — mirroring `WU_WEI_LLM_PROVIDER`,
+    /// `WU_WEI_LLM_API_KEY`, `WU_WEI_LLM_BASE_URL`, `WU_WEI_LLM_MODEL`.
+    pub fn resolve(settings: &HashMap<String, String>) -> Option<Self> {
+        let setting_or_env = |setting_key: &str, env_key: &str| -> Option<String> {
+            settings
+                .get(setting_key)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| std::env::var(env_key).ok())
+        };
+
+        let provider = match setting_or_env("llm_provider", "WU_WEI_LLM_PROVIDER").as_deref() {
+            Some("anthropic") => ProviderKind::Anthropic,
             _ => ProviderKind::OpenAi,
         };
         let (default_key_var, default_base_url, default_model) = match provider {
@@ -162,12 +172,12 @@ impl LlmConfig {
                 "claude-opus-5",
             ),
         };
-        let api_key = std::env::var("WU_WEI_LLM_API_KEY")
-            .or_else(|_| std::env::var(default_key_var))
-            .ok()?;
-        let base_url =
-            std::env::var("WU_WEI_LLM_BASE_URL").unwrap_or_else(|_| default_base_url.to_string());
-        let model = std::env::var("WU_WEI_LLM_MODEL").unwrap_or_else(|_| default_model.to_string());
+        let api_key = setting_or_env("llm_api_key", "WU_WEI_LLM_API_KEY")
+            .or_else(|| std::env::var(default_key_var).ok())?;
+        let base_url = setting_or_env("llm_base_url", "WU_WEI_LLM_BASE_URL")
+            .unwrap_or_else(|| default_base_url.to_string());
+        let model = setting_or_env("llm_model", "WU_WEI_LLM_MODEL")
+            .unwrap_or_else(|| default_model.to_string());
         Some(LlmConfig {
             provider,
             api_key,
@@ -218,4 +228,40 @@ pub fn send_chat_async(
         let _ = tx.send(result);
     });
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_prefers_saved_settings_over_provider_defaults() {
+        let settings = HashMap::from([
+            ("llm_provider".to_string(), "anthropic".to_string()),
+            ("llm_api_key".to_string(), "sk-test".to_string()),
+            (
+                "llm_base_url".to_string(),
+                "https://example.test".to_string(),
+            ),
+            ("llm_model".to_string(), "claude-test".to_string()),
+        ]);
+
+        let config = LlmConfig::resolve(&settings).unwrap();
+        assert_eq!(config.provider, ProviderKind::Anthropic);
+        assert_eq!(config.api_key, "sk-test");
+        assert_eq!(config.base_url, "https://example.test");
+        assert_eq!(config.model, "claude-test");
+    }
+
+    #[test]
+    fn resolve_falls_back_to_the_provider_default_when_only_the_key_is_saved() {
+        let settings = HashMap::from([
+            ("llm_provider".to_string(), "anthropic".to_string()),
+            ("llm_api_key".to_string(), "sk-test".to_string()),
+        ]);
+
+        let config = LlmConfig::resolve(&settings).unwrap();
+        assert_eq!(config.base_url, "https://api.anthropic.com");
+        assert_eq!(config.model, "claude-opus-5");
+    }
 }

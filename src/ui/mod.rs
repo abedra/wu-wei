@@ -5,6 +5,7 @@ pub mod new_project;
 pub mod project_picker;
 pub mod project_view;
 pub mod quick_capture;
+pub mod settings;
 pub mod shortcuts;
 pub mod sidebar;
 pub mod task_detail;

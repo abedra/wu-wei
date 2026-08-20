@@ -3,13 +3,15 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use chrono::{Datelike, Duration, Local, NaiveDate, Utc, Weekday};
 use rusqlite::Connection;
 
+use crate::db;
 use crate::db::error::DbResult;
-use crate::db::{project_repo, task_repo};
+use crate::db::{project_repo, settings_repo, task_repo};
+use crate::db_bootstrap;
 use crate::domain::project::{Project, ProjectId, ProjectKind, ProjectStatus};
 use crate::domain::task::{Recurrence, RecurrenceUnit, Task, TaskId};
 use crate::llm::{
     self, ChatAction, ChatContext, ChatReply, ChatRole, ChatTaskSummary, ChatTurn, LlmConfig,
-    ParsedTask, PromptContext,
+    ParsedTask, PromptContext, ProviderKind,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +120,74 @@ impl TaskEditBuffer {
     }
 }
 
+/// Editable copy of the Settings screen's fields (see `ui::settings`),
+/// committed as a whole by `AppState::save_settings` or thrown away by
+/// `AppState::close_settings` — same draft-buffer shape as
+/// `TaskEditBuffer`/`ProjectEditBuffer`, except commit is an explicit Save
+/// rather than live-as-you-type: unlike those two, a half-typed value here
+/// (a garbage db path, a blank API key) shouldn't take effect immediately.
+#[derive(Debug, Clone)]
+pub struct SettingsDraft {
+    pub llm_provider: ProviderKind,
+    pub llm_api_key: String,
+    /// Whether the API key field currently shows plain text instead of
+    /// masking it — toggled by the eye button in `ui::settings`. Transient
+    /// UI state, not persisted and not part of what Save writes out.
+    pub show_api_key: bool,
+    pub llm_base_url: String,
+    pub llm_model: String,
+    pub db_path: String,
+}
+
+/// `Connection::path` returns `None` for an in-memory or otherwise
+/// path-less database — the same fallback used whether reading the current
+/// path (`SettingsDraft::load`) or deciding whether Settings' db-path field
+/// actually changed (`AppState::save_settings`), so the two never disagree
+/// and trigger a spurious `switch_database` on every Save.
+fn current_db_path(conn: &Connection) -> String {
+    conn.path().unwrap_or("wu_wei.db").to_string()
+}
+
+impl SettingsDraft {
+    /// Seeds the draft from whatever's actually in effect right now: a
+    /// value already saved to `settings` wins, otherwise it falls back to
+    /// the live `LlmConfig` (itself env-derived when nothing's been saved
+    /// yet) so the screen shows what's really active rather than starting
+    /// blank.
+    fn load(conn: &Connection, current: Option<&LlmConfig>) -> Self {
+        let settings = settings_repo::get_all(conn).unwrap_or_default();
+
+        let provider_str = settings
+            .get("llm_provider")
+            .map(String::as_str)
+            .or(current.map(|c| match c.provider {
+                ProviderKind::OpenAi => "openai",
+                ProviderKind::Anthropic => "anthropic",
+            }));
+        let llm_provider = match provider_str {
+            Some("anthropic") => ProviderKind::Anthropic,
+            _ => ProviderKind::OpenAi,
+        };
+
+        let field = |key: &str, fallback: Option<&String>| -> String {
+            settings
+                .get(key)
+                .cloned()
+                .or_else(|| fallback.cloned())
+                .unwrap_or_default()
+        };
+
+        SettingsDraft {
+            llm_provider,
+            llm_api_key: field("llm_api_key", current.map(|c| &c.api_key)),
+            show_api_key: false,
+            llm_base_url: field("llm_base_url", current.map(|c| &c.base_url)),
+            llm_model: field("llm_model", current.map(|c| &c.model)),
+            db_path: current_db_path(conn),
+        }
+    }
+}
+
 pub struct ProjectEditBuffer {
     pub id: ProjectId,
     pub name: String,
@@ -175,7 +245,12 @@ pub struct AppState {
     /// (the info button — see `AppState::toggle_detail_panel`).
     pub detail_panel_open: bool,
     pub error_message: Option<String>,
-    /// `None` when no provider is configured (see `LlmConfig::from_env`) —
+    /// The Settings screen's draft, if it's currently open (toggled by
+    /// Cmd+, — see `ui::shortcuts`/`ui::settings`). `None` when closed; a
+    /// floating window like the other popups, not part of the normal Tab
+    /// order.
+    pub settings: Option<SettingsDraft>,
+    /// `None` when no provider is configured (see `LlmConfig::resolve`) —
     /// AI-assisted capture is simply unavailable, not an error, until set up.
     pub llm_config: Option<LlmConfig>,
     /// Set while a background AI-parse request is in flight; polled once per
@@ -200,6 +275,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(conn: Connection) -> Self {
+        let llm_settings = settings_repo::get_all(&conn).unwrap_or_default();
         let mut state = AppState {
             conn,
             projects: Vec::new(),
@@ -218,7 +294,8 @@ impl AppState {
             sidebar_focused: false,
             detail_panel_open: false,
             error_message: None,
-            llm_config: LlmConfig::from_env(),
+            settings: None,
+            llm_config: LlmConfig::resolve(&llm_settings),
             llm_pending: None,
             llm_busy: false,
             chat_history: Vec::new(),
@@ -871,6 +948,71 @@ impl AppState {
             || self.due_date_picker.is_some()
             || self.quick_capture_open
             || self.new_project_popup_open
+            || self.settings.is_some()
+    }
+
+    /// Opens the Settings screen, seeding its draft from whatever's actually
+    /// in effect right now (see `SettingsDraft::load`).
+    pub fn open_settings(&mut self) {
+        self.settings = Some(SettingsDraft::load(&self.conn, self.llm_config.as_ref()));
+    }
+
+    /// Closes Settings without saving — the draft (and anything typed into
+    /// it) is simply dropped.
+    pub fn close_settings(&mut self) {
+        self.settings = None;
+    }
+
+    /// Commits the Settings draft: persists the LLM fields to `settings`
+    /// (reloading `llm_config` from the result, so AI features pick up the
+    /// change immediately, no restart), and — if the db path changed —
+    /// reconnects live via `switch_database` first, so the LLM fields end up
+    /// saved in whichever database is active afterward.
+    pub fn save_settings(&mut self) {
+        let Some(draft) = self.settings.take() else {
+            return;
+        };
+
+        let new_db_path = draft.db_path.trim().to_string();
+        if !new_db_path.is_empty()
+            && new_db_path != current_db_path(&self.conn)
+            && let Err(e) = self.switch_database(&new_db_path)
+        {
+            self.error_message = Some(e);
+        }
+
+        let provider = match draft.llm_provider {
+            ProviderKind::OpenAi => "openai",
+            ProviderKind::Anthropic => "anthropic",
+        };
+        let pairs = [
+            ("llm_provider", provider),
+            ("llm_api_key", draft.llm_api_key.trim()),
+            ("llm_base_url", draft.llm_base_url.trim()),
+            ("llm_model", draft.llm_model.trim()),
+        ];
+        if let Err(e) = settings_repo::set_many(&self.conn, &pairs) {
+            self.error_message = Some(e.to_string());
+            return;
+        }
+        let llm_settings = settings_repo::get_all(&self.conn).unwrap_or_default();
+        self.llm_config = LlmConfig::resolve(&llm_settings);
+    }
+
+    /// Reconnects to a different database file, live, and remembers it (see
+    /// `db_bootstrap::remember_db_path`) so the next launch opens it too —
+    /// that choice has to be made before any database is open, so it can't
+    /// live inside one. Used when the db path changes in Settings.
+    fn switch_database(&mut self, path: &str) -> Result<(), String> {
+        let new_conn = db::open(path).map_err(|e| e.to_string())?;
+        self.conn = new_conn;
+        db_bootstrap::remember_db_path(path);
+        self.perspective = Perspective::Inbox;
+        self.clear_selection();
+        self.highlighted_task = None;
+        self.refresh_projects();
+        self.refresh_visible_tasks();
+        Ok(())
     }
 
     /// Opens the keyboard-driven due-date picker for the highlighted task,
@@ -2152,5 +2294,98 @@ mod tests {
 
         let all = task_repo::list_all(&state.conn).unwrap();
         assert_eq!(all.len(), 1);
+    }
+
+    #[test]
+    fn open_settings_seeds_the_draft_from_the_active_llm_config() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.llm_config = Some(LlmConfig {
+            provider: ProviderKind::Anthropic,
+            api_key: "sk-test".to_string(),
+            base_url: "https://example.test".to_string(),
+            model: "claude-test".to_string(),
+        });
+
+        state.open_settings();
+
+        let draft = state.settings.as_ref().unwrap();
+        assert_eq!(draft.llm_provider, ProviderKind::Anthropic);
+        assert_eq!(draft.llm_api_key, "sk-test");
+        assert_eq!(draft.llm_base_url, "https://example.test");
+        assert_eq!(draft.llm_model, "claude-test");
+    }
+
+    #[test]
+    fn close_settings_discards_the_draft() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.open_settings();
+        assert!(state.settings.is_some());
+
+        state.close_settings();
+
+        assert!(state.settings.is_none());
+    }
+
+    #[test]
+    fn save_settings_persists_llm_fields_and_updates_the_live_config() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.open_settings();
+        {
+            let draft = state.settings.as_mut().unwrap();
+            draft.llm_provider = ProviderKind::Anthropic;
+            draft.llm_api_key = "sk-live".to_string();
+            draft.llm_base_url = "https://example.test".to_string();
+            draft.llm_model = "claude-test".to_string();
+        }
+
+        state.save_settings();
+
+        assert!(state.settings.is_none());
+        let config = state.llm_config.as_ref().unwrap();
+        assert_eq!(config.provider, ProviderKind::Anthropic);
+        assert_eq!(config.api_key, "sk-live");
+        assert_eq!(config.base_url, "https://example.test");
+        assert_eq!(config.model, "claude-test");
+
+        let saved = settings_repo::get_all(&state.conn).unwrap();
+        assert_eq!(
+            saved.get("llm_api_key").map(String::as_str),
+            Some("sk-live")
+        );
+    }
+
+    #[test]
+    fn save_settings_leaves_the_database_untouched_when_the_path_field_is_unchanged() {
+        // Regression test: `SettingsDraft::load` and `save_settings` must
+        // agree on what "the current db path" is, or a Save with the path
+        // field left completely alone looks like a change and triggers a
+        // pointless (and, on a real db, disruptive) reconnect.
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "before save".to_string();
+        state.quick_capture_submit();
+
+        state.open_settings();
+        state.save_settings();
+
+        assert_eq!(state.visible_tasks.len(), 1);
+        assert_eq!(state.visible_tasks[0].title, "before save");
+    }
+
+    #[test]
+    fn save_settings_reconnects_when_the_db_path_field_changes() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "in the old database".to_string();
+        state.quick_capture_submit();
+        assert_eq!(state.visible_tasks.len(), 1);
+
+        state.open_settings();
+        state.settings.as_mut().unwrap().db_path = ":memory:".to_string();
+        state.save_settings();
+
+        // A fresh `:memory:` database has nothing in it, and the
+        // perspective/selection reset along with the reconnect.
+        assert_eq!(state.visible_tasks.len(), 0);
+        assert_eq!(state.perspective, Perspective::Inbox);
+        assert_eq!(state.selection, Selection::None);
     }
 }

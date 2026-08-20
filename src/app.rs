@@ -35,6 +35,7 @@ impl eframe::App for WuWeiApp {
         ui::due_date_picker::draw(&ctx, &mut self.state);
         ui::quick_capture::draw(&ctx, &mut self.state);
         ui::new_project::draw(&ctx, &mut self.state);
+        ui::settings::draw(&ctx, &mut self.state);
 
         egui::Panel::left("sidebar")
             .resizable(true)

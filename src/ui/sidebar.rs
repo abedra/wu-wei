@@ -21,6 +21,9 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState, logo: &egui::TextureHandle)
             {
                 state.toggle_detail_panel();
             }
+            if ui.button("⚙").on_hover_text("Settings (Cmd+,)").clicked() {
+                state.open_settings();
+            }
         });
     });
     ui.add_space(8.0);

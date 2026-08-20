@@ -27,3 +27,15 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_due_date    ON tasks(due_date);
 CREATE INDEX IF NOT EXISTS idx_tasks_completed   ON tasks(completed);
+
+-- Settings edited from the in-app Settings screen (see ui::settings), e.g.
+-- "llm_provider"/"llm_api_key"/"llm_base_url"/"llm_model". A value saved
+-- here takes priority over its corresponding WU_WEI_* environment variable
+-- (see LlmConfig::resolve) — the environment remains a first-run default,
+-- not the source of truth, once something's been saved. The database file
+-- location itself can't live here (it has to be known before this database
+-- is open); that's remembered separately, see `db_bootstrap`.
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY NOT NULL,
+    value TEXT NOT NULL
+);

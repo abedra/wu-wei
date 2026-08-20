@@ -1,5 +1,6 @@
 mod app;
 mod db;
+mod db_bootstrap;
 mod desktop_install;
 mod domain;
 mod llm;
@@ -18,7 +19,7 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    let db_path = std::env::var("WU_WEI_DB_PATH").unwrap_or_else(|_| "wu_wei.db".to_string());
+    let db_path = db_bootstrap::resolve_db_path();
     let conn = db::open(&db_path).expect("failed to open database");
 
     let options = eframe::NativeOptions {

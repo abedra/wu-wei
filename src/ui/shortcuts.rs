@@ -12,6 +12,7 @@ pub fn handle(ctx: &egui::Context, state: &mut AppState) {
     // never open (see egui's `InputState::consume_shortcut` docs).
     handle_new_project_popup(ctx, state);
     handle_quick_capture(ctx, state);
+    handle_settings(ctx, state);
     handle_project_picker(ctx, state);
     handle_due_date_picker(ctx, state);
     handle_sidebar_navigation(ctx, state);
@@ -21,6 +22,27 @@ pub fn handle(ctx: &egui::Context, state: &mut AppState) {
     handle_perspective_switches(ctx, state);
     handle_delete(ctx, state);
     handle_complete_toggle(ctx, state);
+}
+
+/// Cmd+, opens Settings — the conventional "Preferences" shortcut. Unlike
+/// the other popups, Settings has no single Enter-to-confirm action (it's a
+/// form with several fields, committed via the Save button in
+/// `ui::settings`), so this only takes over Escape-to-cancel while open.
+fn handle_settings(ctx: &egui::Context, state: &mut AppState) {
+    if state.settings.is_some() {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            state.close_settings();
+        }
+        return;
+    }
+
+    if state.any_picker_open() {
+        return;
+    }
+    let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Comma);
+    if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
+        state.open_settings();
+    }
 }
 
 /// While the sidebar has keyboard control (entered via `handle_focus_sidebar`

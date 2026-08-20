@@ -1,5 +1,6 @@
 pub mod error;
 pub mod project_repo;
+pub mod settings_repo;
 pub mod task_repo;
 
 use rusqlite::Connection;
