@@ -213,6 +213,14 @@ pub struct AppState {
     pub projects: Vec<Project>,
     pub visible_tasks: Vec<Task>,
     pub perspective: Perspective,
+    /// The calendar date `visible_tasks` was last computed against — not
+    /// user-facing state, just how `refresh_if_date_changed` notices the
+    /// wall clock has crossed midnight since the last refresh (e.g. the app
+    /// was left open on Today overnight) and knows to requery rather than
+    /// silently going stale. `app.rs` calls it once per frame, alongside a
+    /// periodic repaint request that keeps frames happening even when the
+    /// app is otherwise idle.
+    pub last_seen_date: NaiveDate,
     pub selection: Selection,
     /// Keyboard cursor over `visible_tasks`, moved by the Up/Down arrows.
     /// Independent of `selection`: moving it does not open the detail panel
@@ -287,6 +295,7 @@ impl AppState {
             projects: Vec::new(),
             visible_tasks: Vec::new(),
             perspective: Perspective::Inbox,
+            last_seen_date: Local::now().date_naive(),
             selection: Selection::None,
             highlighted_task: None,
             task_edit_buffer: None,
@@ -409,6 +418,20 @@ impl AppState {
             && !self.visible_tasks.iter().any(|t| t.id == id)
         {
             self.highlighted_task = None;
+        }
+    }
+
+    /// Catches the wall clock crossing midnight while the app just sat open
+    /// (e.g. left on Today overnight): without this, `visible_tasks` stays
+    /// exactly what it was at the last refresh, since nothing else re-queries
+    /// it on its own. Cheap to call every frame — it's a date comparison
+    /// that only does real work on the rare frame where the date actually
+    /// changed.
+    pub fn refresh_if_date_changed(&mut self) {
+        let today = Local::now().date_naive();
+        if today != self.last_seen_date {
+            self.last_seen_date = today;
+            self.refresh_visible_tasks();
         }
     }
 
@@ -2486,5 +2509,35 @@ mod tests {
 
         assert_eq!(state.selection, Selection::None);
         assert!(!state.detail_panel_open);
+    }
+
+    #[test]
+    fn refresh_if_date_changed_requeries_once_the_date_has_moved_on() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        // Inserted directly via the repo, bypassing quick_capture (which
+        // refreshes on its own) — `visible_tasks` won't see it until
+        // something actually re-queries.
+        task_repo::create(&state.conn, &Task::new_inbox("added while asleep")).unwrap();
+        assert!(state.visible_tasks.is_empty());
+
+        // A date from the past always differs from the real "today",
+        // regardless of when the test runs.
+        state.last_seen_date = NaiveDate::from_ymd_opt(2000, 1, 1).unwrap();
+        state.refresh_if_date_changed();
+
+        assert_eq!(state.last_seen_date, Local::now().date_naive());
+        assert_eq!(state.visible_tasks.len(), 1);
+        assert_eq!(state.visible_tasks[0].title, "added while asleep");
+    }
+
+    #[test]
+    fn refresh_if_date_changed_is_a_noop_when_the_date_is_unchanged() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        task_repo::create(&state.conn, &Task::new_inbox("added later, same day")).unwrap();
+        assert!(state.visible_tasks.is_empty());
+
+        state.refresh_if_date_changed();
+
+        assert!(state.visible_tasks.is_empty());
     }
 }

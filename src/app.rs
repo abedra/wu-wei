@@ -28,6 +28,14 @@ impl WuWeiApp {
 impl eframe::App for WuWeiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // egui/eframe only repaints on input by default, so a window just
+        // sitting open (e.g. on Today, overnight) would otherwise never get
+        // another frame to notice the date changed. This re-arms a wakeup
+        // each frame, which is what actually gives `refresh_if_date_changed`
+        // a chance to run when nothing else is happening — a few times an
+        // hour is plenty for a same-day check like this.
+        ctx.request_repaint_after(std::time::Duration::from_secs(300));
+        self.state.refresh_if_date_changed();
         self.state.poll_llm();
         self.state.poll_chat();
         ui::shortcuts::handle(&ctx, &mut self.state);
