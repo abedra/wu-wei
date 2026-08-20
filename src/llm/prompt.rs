@@ -727,7 +727,10 @@ mod tests {
         };
         let reply = raw.into_chat_reply(&[]);
         assert_eq!(reply.reply, "Done.");
-        assert_eq!(reply.actions, vec![ChatAction::CompleteTask { task_id: id }]);
+        assert_eq!(
+            reply.actions,
+            vec![ChatAction::CompleteTask { task_id: id }]
+        );
         assert!(reply.parse_failures.is_empty());
     }
 
@@ -745,7 +748,10 @@ mod tests {
             reply.reply,
             "Rolled the overdue task and made a new project."
         );
-        assert_eq!(reply.actions, vec![ChatAction::CompleteTask { task_id: id }]);
+        assert_eq!(
+            reply.actions,
+            vec![ChatAction::CompleteTask { task_id: id }]
+        );
         assert_eq!(reply.parse_failures.len(), 1);
         assert!(reply.parse_failures[0].contains("missing a project"));
     }
@@ -960,5 +966,4 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("missing a title"));
     }
-
 }

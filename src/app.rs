@@ -6,12 +6,21 @@ use crate::ui;
 
 pub struct WuWeiApp {
     state: AppState,
+    icon: egui::TextureHandle,
 }
 
 impl WuWeiApp {
-    pub fn new(conn: Connection) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, conn: Connection) -> Self {
+        const LOGO_SIZE: u32 = 128;
+        let rgba = ui::icon::enso_rgba(LOGO_SIZE, ui::theme::ACCENT);
+        let image = egui::ColorImage::from_rgba_unmultiplied([LOGO_SIZE as usize; 2], &rgba);
+        let icon = cc
+            .egui_ctx
+            .load_texture("app_logo", image, egui::TextureOptions::LINEAR);
+
         Self {
             state: AppState::new(conn),
+            icon,
         }
     }
 }
@@ -31,7 +40,7 @@ impl eframe::App for WuWeiApp {
             .resizable(true)
             .default_size(200.0)
             .frame(ui::theme::sidebar_frame(ui.style()))
-            .show(ui, |ui| ui::sidebar::draw(ui, &mut self.state));
+            .show(ui, |ui| ui::sidebar::draw(ui, &mut self.state, &self.icon));
 
         if self.state.detail_panel_open {
             egui::Panel::right("detail")

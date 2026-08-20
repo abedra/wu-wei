@@ -7,20 +7,21 @@ ifneq (,$(wildcard ./.env))
     export
 endif
 
-.PHONY: help doctor run build release test fmt fmt-check clippy check clean
+.PHONY: help doctor run build release install-desktop test fmt fmt-check clippy check clean
 
 help:
 	@echo "wu-wei — available targets:"
-	@echo "  doctor      check that required tools are installed"
-	@echo "  run         run the app (cargo run)"
-	@echo "  build       debug build"
-	@echo "  release     release build"
-	@echo "  test        run the test suite"
-	@echo "  fmt         apply rustfmt"
-	@echo "  fmt-check   check formatting without writing changes"
-	@echo "  clippy      run clippy lints (all targets)"
-	@echo "  check       fmt-check + clippy + test"
-	@echo "  clean       cargo clean"
+	@echo "  doctor          check that required tools are installed"
+	@echo "  run             run the app (cargo run)"
+	@echo "  build           debug build"
+	@echo "  release         release build"
+	@echo "  install-desktop install a .desktop entry + icon so app switchers show the logo"
+	@echo "  test            run the test suite"
+	@echo "  fmt             apply rustfmt"
+	@echo "  fmt-check       check formatting without writing changes"
+	@echo "  clippy          run clippy lints (all targets)"
+	@echo "  check           fmt-check + clippy + test"
+	@echo "  clean           cargo clean"
 
 ## Verifies the toolchain this project needs is on PATH:
 ##   - cargo/rustc (edition 2024 requires rustc >= 1.85)
@@ -42,6 +43,13 @@ build:
 
 release:
 	cargo build --release
+
+## Registers the app with the desktop shell (Icon=/StartupWMClass matching
+## the window's app ID) so task switchers resolve a real icon instead of a
+## generic placeholder. Points Exec at the release binary, not a `cargo run`
+## debug artifact `cargo clean` would delete out from under it.
+install-desktop: release
+	./target/release/wu-wei install-desktop
 
 test:
 	cargo test

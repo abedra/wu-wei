@@ -165,10 +165,9 @@ impl LlmConfig {
         let api_key = std::env::var("WU_WEI_LLM_API_KEY")
             .or_else(|_| std::env::var(default_key_var))
             .ok()?;
-        let base_url = std::env::var("WU_WEI_LLM_BASE_URL")
-            .unwrap_or_else(|_| default_base_url.to_string());
-        let model =
-            std::env::var("WU_WEI_LLM_MODEL").unwrap_or_else(|_| default_model.to_string());
+        let base_url =
+            std::env::var("WU_WEI_LLM_BASE_URL").unwrap_or_else(|_| default_base_url.to_string());
+        let model = std::env::var("WU_WEI_LLM_MODEL").unwrap_or_else(|_| default_model.to_string());
         Some(LlmConfig {
             provider,
             api_key,

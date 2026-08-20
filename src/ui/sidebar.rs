@@ -1,12 +1,16 @@
 use eframe::egui;
 
 use crate::state::{AppState, Perspective};
-use crate::ui::theme;
 
-pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
+pub fn draw(ui: &mut egui::Ui, state: &mut AppState, logo: &egui::TextureHandle) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.heading(egui::RichText::new("Wu Wei").color(theme::ACCENT).strong());
+        let heading_height = ui.text_style_height(&egui::TextStyle::Heading);
+        ui.add(
+            egui::Image::from_texture(logo)
+                .fit_to_exact_size(egui::vec2(heading_height, heading_height)),
+        )
+        .on_hover_text("Wu Wei");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // The info button: shows/hides the detail panel regardless of
             // selection (it otherwise opens and closes automatically).
