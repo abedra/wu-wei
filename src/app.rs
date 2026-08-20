@@ -38,6 +38,8 @@ impl eframe::App for WuWeiApp {
         self.state.refresh_if_date_changed();
         self.state.poll_llm();
         self.state.poll_chat();
+        self.state.poll_sync();
+        self.state.maybe_auto_sync();
         ui::shortcuts::handle(&ctx, &mut self.state);
         ui::project_picker::draw(&ctx, &mut self.state);
         ui::due_date_picker::draw(&ctx, &mut self.state);

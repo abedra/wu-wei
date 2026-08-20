@@ -98,17 +98,23 @@ pub struct Project {
     pub status: ProjectStatus,
     pub kind: ProjectKind,
     pub created_at: DateTime<Utc>,
+    /// Stamped by `project_repo::create`/`update` on every write, ignoring
+    /// whatever's set here — callers never manage it by hand. Used by
+    /// `sync` to pick the newer side of a conflicting edit.
+    pub updated_at: DateTime<Utc>,
 }
 
 impl Project {
     pub fn new(name: impl Into<String>) -> Self {
+        let now = Utc::now();
         Project {
             id: ProjectId::new(),
             name: name.into(),
             notes: String::new(),
             status: ProjectStatus::Active,
             kind: ProjectKind::Parallel,
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
         }
     }
 }

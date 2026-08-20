@@ -78,12 +78,17 @@ pub struct Task {
     pub completed: bool,
     pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// Stamped by `task_repo::create`/`update` on every write, ignoring
+    /// whatever's set here — callers never manage it by hand. Used by
+    /// `sync` to pick the newer side of a conflicting edit.
+    pub updated_at: DateTime<Utc>,
     pub estimated_minutes: Option<i64>,
     pub recurrence: Option<Recurrence>,
 }
 
 impl Task {
     pub fn new_inbox(title: impl Into<String>) -> Self {
+        let now = Utc::now();
         Task {
             id: TaskId::new(),
             title: title.into(),
@@ -93,7 +98,8 @@ impl Task {
             defer_date: None,
             completed: false,
             completed_at: None,
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
             estimated_minutes: None,
             recurrence: None,
         }

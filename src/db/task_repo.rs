@@ -3,15 +3,18 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use super::error::{DbError, DbResult};
+use super::sync_repo;
 use crate::domain::project::ProjectId;
 use crate::domain::task::{Recurrence, RecurrenceUnit, Task, TaskId};
 
+/// Stamps `updated_at` to now, ignoring whatever's on `task` for that
+/// column — see the field's doc comment on `domain::task::Task`.
 pub fn create(conn: &Connection, task: &Task) -> DbResult<()> {
     conn.execute(
         "INSERT INTO tasks (id, title, notes, project_id, due_date, defer_date,
-                             completed, completed_at, created_at, estimated_minutes,
-                             recurrence_interval, recurrence_unit)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                             completed, completed_at, created_at, updated_at,
+                             estimated_minutes, recurrence_interval, recurrence_unit)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             task.id.0.to_string(),
             task.title,
@@ -22,6 +25,7 @@ pub fn create(conn: &Connection, task: &Task) -> DbResult<()> {
             task.completed,
             task.completed_at,
             task.created_at,
+            Utc::now(),
             task.estimated_minutes,
             task.recurrence.map(|r| r.interval),
             task.recurrence.map(|r| r.unit.as_str()),
@@ -30,12 +34,13 @@ pub fn create(conn: &Connection, task: &Task) -> DbResult<()> {
     Ok(())
 }
 
+/// Stamps `updated_at` to now — see `create`.
 pub fn update(conn: &Connection, task: &Task) -> DbResult<()> {
     conn.execute(
         "UPDATE tasks SET title = ?2, notes = ?3, project_id = ?4, due_date = ?5,
                            defer_date = ?6, completed = ?7,
-                           completed_at = ?8, estimated_minutes = ?9,
-                           recurrence_interval = ?10, recurrence_unit = ?11
+                           completed_at = ?8, updated_at = ?9, estimated_minutes = ?10,
+                           recurrence_interval = ?11, recurrence_unit = ?12
          WHERE id = ?1",
         params![
             task.id.0.to_string(),
@@ -46,6 +51,7 @@ pub fn update(conn: &Connection, task: &Task) -> DbResult<()> {
             task.defer_date,
             task.completed,
             task.completed_at,
+            Utc::now(),
             task.estimated_minutes,
             task.recurrence.map(|r| r.interval),
             task.recurrence.map(|r| r.unit.as_str()),
@@ -54,26 +60,91 @@ pub fn update(conn: &Connection, task: &Task) -> DbResult<()> {
     Ok(())
 }
 
+/// Hard delete, unchanged — additionally records a tombstone (see
+/// `sync_repo`) so a later sync run has something to tell other devices.
 pub fn delete(conn: &Connection, id: TaskId) -> DbResult<()> {
-    let rows = conn.execute("DELETE FROM tasks WHERE id = ?1", params![id.0.to_string()])?;
+    let id_str = id.0.to_string();
+    let rows = conn.execute("DELETE FROM tasks WHERE id = ?1", params![id_str])?;
     if rows == 0 {
         return Err(DbError::NotFound(format!("task {}", id.0)));
     }
+    sync_repo::record_tombstone(conn, "task", &id_str, Utc::now())?;
     Ok(())
 }
 
 /// Permanently deletes every completed task — the "Archive Completed"
-/// action in the Completed view. Returns how many were removed.
+/// action in the Completed view. Returns how many were removed. Records a
+/// tombstone per deleted task, same as `delete`.
 pub fn delete_completed(conn: &Connection) -> DbResult<usize> {
+    let mut stmt = conn.prepare("SELECT id FROM tasks WHERE completed = 1")?;
+    let ids: Vec<String> = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    drop(stmt);
+
     let rows = conn.execute("DELETE FROM tasks WHERE completed = 1", [])?;
+    let deleted_at = Utc::now();
+    for id in &ids {
+        sync_repo::record_tombstone(conn, "task", id, deleted_at)?;
+    }
     Ok(rows)
+}
+
+/// Writes `task` exactly as given — including `created_at`/`updated_at`
+/// verbatim, unlike `create`/`update` — inserting it if the id is new,
+/// overwriting it in place if not. Used only by `sync::merge`: applying a
+/// winning remote version must preserve its real `updated_at`, or every
+/// merge would stamp "now" and the next merge couldn't tell which side is
+/// actually newer.
+pub fn upsert_synced(conn: &Connection, task: &Task) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO tasks (id, title, notes, project_id, due_date, defer_date,
+                             completed, completed_at, created_at, updated_at,
+                             estimated_minutes, recurrence_interval, recurrence_unit)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+         ON CONFLICT(id) DO UPDATE SET
+             title = excluded.title, notes = excluded.notes,
+             project_id = excluded.project_id, due_date = excluded.due_date,
+             defer_date = excluded.defer_date, completed = excluded.completed,
+             completed_at = excluded.completed_at, updated_at = excluded.updated_at,
+             estimated_minutes = excluded.estimated_minutes,
+             recurrence_interval = excluded.recurrence_interval,
+             recurrence_unit = excluded.recurrence_unit",
+        params![
+            task.id.0.to_string(),
+            task.title,
+            task.notes,
+            task.project_id.map(|p| p.0.to_string()),
+            task.due_date,
+            task.defer_date,
+            task.completed,
+            task.completed_at,
+            task.created_at,
+            task.updated_at,
+            task.estimated_minutes,
+            task.recurrence.map(|r| r.interval),
+            task.recurrence.map(|r| r.unit.as_str()),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Deletes `id` if it exists, silently doing nothing if it doesn't (unlike
+/// `delete`, which errors) — and, unlike `delete`, does *not* record its
+/// own tombstone; `sync::merge` records one separately with the tombstone's
+/// original timestamp. Used only by `sync::merge`, applying a deletion that
+/// may or may not have a local row to remove (this device might only ever
+/// have heard of the id via the tombstone itself).
+pub fn delete_if_exists(conn: &Connection, id: TaskId) -> DbResult<()> {
+    conn.execute("DELETE FROM tasks WHERE id = ?1", params![id.0.to_string()])?;
+    Ok(())
 }
 
 pub fn get(conn: &Connection, id: TaskId) -> DbResult<Option<Task>> {
     conn.query_row(
         "SELECT id, title, notes, project_id, due_date, defer_date,
-                completed, completed_at, created_at, estimated_minutes,
-                recurrence_interval, recurrence_unit
+                completed, completed_at, created_at, updated_at,
+                estimated_minutes, recurrence_interval, recurrence_unit
          FROM tasks WHERE id = ?1",
         params![id.0.to_string()],
         row_to_task,
@@ -183,8 +254,8 @@ fn list_where(
 ) -> DbResult<Vec<Task>> {
     let sql = format!(
         "SELECT id, title, notes, project_id, due_date, defer_date,
-                completed, completed_at, created_at, estimated_minutes,
-                recurrence_interval, recurrence_unit
+                completed, completed_at, created_at, updated_at,
+                estimated_minutes, recurrence_interval, recurrence_unit
          FROM tasks WHERE {where_clause} ORDER BY {order_by}"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -197,8 +268,13 @@ fn list_where(
 fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     let id: String = row.get(0)?;
     let project_id: Option<String> = row.get(3)?;
-    let recurrence_interval: Option<u32> = row.get(10)?;
-    let recurrence_unit: Option<String> = row.get(11)?;
+    let created_at: chrono::DateTime<Utc> = row.get(8)?;
+    // Falls back to `created_at` for a row somehow read before `migrate`'s
+    // backfill ran — shouldn't happen in practice (`db::open` always runs
+    // it first), but a fallback is cheap and avoids a panic if it did.
+    let updated_at: Option<chrono::DateTime<Utc>> = row.get(9)?;
+    let recurrence_interval: Option<u32> = row.get(11)?;
+    let recurrence_unit: Option<String> = row.get(12)?;
     let recurrence = recurrence_interval
         .zip(recurrence_unit)
         .map(|(interval, unit)| Recurrence {
@@ -223,8 +299,9 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         defer_date: row.get(5)?,
         completed: row.get(6)?,
         completed_at: row.get(7)?,
-        created_at: row.get(8)?,
-        estimated_minutes: row.get(9)?,
+        created_at,
+        updated_at: updated_at.unwrap_or(created_at),
+        estimated_minutes: row.get(10)?,
         recurrence,
     })
 }
@@ -256,6 +333,35 @@ mod tests {
 
         delete(&conn, task.id).unwrap();
         assert!(get(&conn, task.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn create_and_update_stamp_updated_at() {
+        let conn = db::open_in_memory().unwrap();
+        let task = Task::new_inbox("stamped");
+        create(&conn, &task).unwrap();
+        let after_create = get(&conn, task.id).unwrap().unwrap().updated_at;
+
+        let mut task = get(&conn, task.id).unwrap().unwrap();
+        task.title = "stamped again".to_string();
+        update(&conn, &task).unwrap();
+        let after_update = get(&conn, task.id).unwrap().unwrap().updated_at;
+
+        assert!(after_update >= after_create);
+    }
+
+    #[test]
+    fn delete_records_a_tombstone() {
+        let conn = db::open_in_memory().unwrap();
+        let task = Task::new_inbox("gone soon");
+        create(&conn, &task).unwrap();
+
+        delete(&conn, task.id).unwrap();
+
+        let tombstones = crate::db::sync_repo::list_tombstones(&conn).unwrap();
+        assert_eq!(tombstones.len(), 1);
+        assert_eq!(tombstones[0].kind, "task");
+        assert_eq!(tombstones[0].id, task.id.0.to_string());
     }
 
     #[test]
@@ -315,6 +421,10 @@ mod tests {
         let remaining = list_all(&conn).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].title, "open");
+
+        let tombstones = crate::db::sync_repo::list_tombstones(&conn).unwrap();
+        assert_eq!(tombstones.len(), 2);
+        assert!(tombstones.iter().all(|t| t.kind == "task"));
     }
 
     #[test]

@@ -55,6 +55,7 @@ const SHORTCUT_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("Cmd+Shift+N", "New project"),
         ],
     ),
+    ("Sync", &[("Cmd+Shift+S", "Sync now")]),
     ("Any popup", &[("Enter", "Confirm"), ("Esc", "Cancel")]),
 ];
 
@@ -135,6 +136,24 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                 ui.add(egui::TextEdit::singleline(&mut draft.db_path).desired_width(300.0));
             });
             ui.weak("Changing this reconnects immediately on Save.");
+
+            ui.separator();
+            ui.heading("Sync");
+            ui.label(
+                "Reconciles this device's tasks/projects against others via a \
+                 shared folder (Dropbox, iCloud Drive, a network share, a USB \
+                 stick, ...) every device points at the same place — not a live \
+                 shared database. Leave blank to disable.",
+            );
+            ui.horizontal(|ui| {
+                ui.label("Folder");
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.sync_folder_path).desired_width(300.0),
+                );
+            });
+            if let Some(status) = &state.sync_status {
+                ui.weak(format!("Last sync: {status}"));
+            }
 
             ui.separator();
             ui.heading("Keyboard Shortcuts");

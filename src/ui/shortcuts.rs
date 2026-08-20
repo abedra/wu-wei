@@ -13,6 +13,7 @@ pub fn handle(ctx: &egui::Context, state: &mut AppState) {
     handle_new_project_popup(ctx, state);
     handle_quick_capture(ctx, state);
     handle_settings(ctx, state);
+    handle_sync(ctx, state);
     handle_archive_confirm(ctx, state);
     handle_project_picker(ctx, state);
     handle_due_date_picker(ctx, state);
@@ -43,6 +44,19 @@ fn handle_settings(ctx: &egui::Context, state: &mut AppState) {
     let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Comma);
     if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
         state.open_settings();
+    }
+}
+
+/// Cmd+Shift+S triggers a sync directly (see `ui::sidebar`'s ⟳ button /
+/// `AppState::run_sync`) — no popup involved, so unlike the other shortcuts
+/// here there's nothing to gate on `any_picker_open`.
+fn handle_sync(ctx: &egui::Context, state: &mut AppState) {
+    let shortcut = egui::KeyboardShortcut::new(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::S,
+    );
+    if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
+        state.run_sync();
     }
 }
 

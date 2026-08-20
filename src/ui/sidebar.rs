@@ -24,6 +24,16 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState, logo: &egui::TextureHandle)
             if ui.button("⚙").on_hover_text("Settings (Cmd+,)").clicked() {
                 state.open_settings();
             }
+            let tooltip = state
+                .sync_status
+                .clone()
+                .unwrap_or_else(|| "Sync now (Cmd+Shift+S)".to_string());
+            if state.sync_busy {
+                ui.add_enabled(false, egui::Button::new("⟳"))
+                    .on_disabled_hover_text(tooltip);
+            } else if ui.button("⟳").on_hover_text(tooltip).clicked() {
+                state.run_sync();
+            }
         });
     });
     ui.add_space(8.0);

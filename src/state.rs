@@ -2,6 +2,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 
 use chrono::{Datelike, Duration, Local, NaiveDate, Utc, Weekday};
 use rusqlite::Connection;
+use uuid::Uuid;
 
 use crate::db;
 use crate::db::error::DbResult;
@@ -13,6 +14,7 @@ use crate::llm::{
     self, ChatAction, ChatContext, ChatReply, ChatRole, ChatTaskSummary, ChatTurn, LlmConfig,
     ParsedTask, PromptContext, ProviderKind,
 };
+use crate::sync::{self, SyncSummary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Perspective {
@@ -137,6 +139,7 @@ pub struct SettingsDraft {
     pub llm_base_url: String,
     pub llm_model: String,
     pub db_path: String,
+    pub sync_folder_path: String,
 }
 
 /// `Connection::path` returns `None` for an in-memory or otherwise
@@ -145,7 +148,14 @@ pub struct SettingsDraft {
 /// actually changed (`AppState::save_settings`), so the two never disagree
 /// and trigger a spurious `switch_database` on every Save.
 fn current_db_path(conn: &Connection) -> String {
-    conn.path().unwrap_or("wu_wei.db").to_string()
+    // `Connection::path` returns `Some("")` — not `None` — for an
+    // in-memory or temporary database, so an emptiness check is needed,
+    // not just an `Option` one (same gotcha as `AppState::run_sync`'s
+    // identical fallback).
+    conn.path()
+        .filter(|p| !p.is_empty())
+        .unwrap_or("wu_wei.db")
+        .to_string()
 }
 
 impl SettingsDraft {
@@ -184,6 +194,10 @@ impl SettingsDraft {
             llm_base_url: field("llm_base_url", current.map(|c| &c.base_url)),
             llm_model: field("llm_model", current.map(|c| &c.model)),
             db_path: current_db_path(conn),
+            sync_folder_path: settings
+                .get("sync_folder_path")
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 }
@@ -285,6 +299,17 @@ pub struct AppState {
     /// input field and clears it, so the next message can be typed
     /// immediately without reaching for the mouse.
     pub chat_focus_requested: bool,
+    /// Set while a background sync run is in flight; polled once per frame
+    /// in `poll_sync`. Same shape as `llm_pending`/`llm_busy`.
+    pub sync_pending: Option<Receiver<Result<SyncSummary, String>>>,
+    pub sync_busy: bool,
+    /// The last sync attempt's result or error, shown near the sync button
+    /// (see `ui::sidebar`). `None` before the first attempt.
+    pub sync_status: Option<String>,
+    /// When `maybe_auto_sync` last actually ran one — `None` means it
+    /// hasn't yet, which is also what makes it fire on the very first
+    /// frame (covers "sync on launch").
+    pub last_auto_sync: Option<chrono::DateTime<Utc>>,
 }
 
 impl AppState {
@@ -319,6 +344,10 @@ impl AppState {
             chat_pending: None,
             chat_busy: false,
             chat_focus_requested: false,
+            sync_pending: None,
+            sync_busy: false,
+            sync_status: None,
+            last_auto_sync: None,
         };
         state.refresh_projects();
         state.refresh_visible_tasks();
@@ -433,6 +462,106 @@ impl AppState {
             self.last_seen_date = today;
             self.refresh_visible_tasks();
         }
+    }
+
+    /// The stable per-installation id used to name this device's snapshot
+    /// file (see `sync.rs`). Resolved from `settings` (key
+    /// `sync_device_id`), generating and persisting one on first use.
+    fn sync_device_id(&self) -> String {
+        if let Ok(settings) = settings_repo::get_all(&self.conn)
+            && let Some(id) = settings.get("sync_device_id")
+        {
+            return id.clone();
+        }
+        let id = Uuid::new_v4().to_string();
+        let _ = settings_repo::set(&self.conn, "sync_device_id", &id);
+        id
+    }
+
+    /// Kicks off a sync run on a background thread (see
+    /// `sync::run_async`) — safe to call anytime; it's a no-op (with an
+    /// explanatory `sync_status`) if no folder is configured, one's
+    /// already in flight, or this database has no file path to hand a
+    /// second connection (an in-memory database, which only tests use).
+    pub fn run_sync(&mut self) {
+        if self.sync_busy {
+            return;
+        }
+        let settings = settings_repo::get_all(&self.conn).unwrap_or_default();
+        let Some(folder) = settings
+            .get("sync_folder_path")
+            .filter(|f| !f.trim().is_empty())
+        else {
+            self.sync_status = Some("Set a sync folder in Settings first".to_string());
+            return;
+        };
+        // `Connection::path` returns `Some("")` — not `None` — for an
+        // in-memory or temporary database, so an emptiness check is needed,
+        // not just an `Option` one.
+        let Some(db_path) = self.conn.path().filter(|p| !p.is_empty()) else {
+            self.sync_status = Some("Sync isn't available for this database".to_string());
+            return;
+        };
+        let device_id = self.sync_device_id();
+        self.sync_pending = Some(sync::run_async(
+            db_path.to_string(),
+            folder.clone(),
+            device_id,
+        ));
+        self.sync_busy = true;
+        self.sync_status = Some("Syncing...".to_string());
+    }
+
+    /// Polled once per frame from `app.rs`, mirrors `poll_llm`. On
+    /// completion, refreshes everything derived from the local database —
+    /// the background thread merged into it through its own connection, so
+    /// this thread's cached `visible_tasks`/`projects` won't reflect that
+    /// on their own.
+    pub fn poll_sync(&mut self) {
+        let Some(rx) = &self.sync_pending else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(summary)) => {
+                self.sync_pending = None;
+                self.sync_busy = false;
+                self.sync_status = Some(summary.describe());
+                self.refresh_projects();
+                self.refresh_visible_tasks();
+            }
+            Ok(Err(e)) => {
+                self.sync_pending = None;
+                self.sync_busy = false;
+                self.sync_status = Some(format!("Sync failed: {e}"));
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.sync_pending = None;
+                self.sync_busy = false;
+            }
+        }
+    }
+
+    /// Called once per frame from `app.rs`, alongside `refresh_if_date_changed`
+    /// — fires `run_sync` if a folder is configured and enough time has
+    /// passed since the last attempt (or none has happened yet, which
+    /// covers "sync on launch" as the very first tick). A longer interval
+    /// than the date check, since this one does real file I/O against a
+    /// possibly network-backed folder.
+    pub fn maybe_auto_sync(&mut self) {
+        const AUTO_SYNC_INTERVAL: Duration = Duration::minutes(15);
+        if self.sync_busy {
+            return;
+        }
+        let due = match self.last_auto_sync {
+            None => true,
+            Some(last) => Utc::now() - last >= AUTO_SYNC_INTERVAL,
+        };
+        if !due {
+            return;
+        }
+        self.last_auto_sync = Some(Utc::now());
+        self.run_sync();
     }
 
     pub fn refresh_projects(&mut self) {
@@ -1047,6 +1176,7 @@ impl AppState {
             ("llm_api_key", draft.llm_api_key.trim()),
             ("llm_base_url", draft.llm_base_url.trim()),
             ("llm_model", draft.llm_model.trim()),
+            ("sync_folder_path", draft.sync_folder_path.trim()),
         ];
         if let Err(e) = settings_repo::set_many(&self.conn, &pairs) {
             self.error_message = Some(e.to_string());
@@ -1209,6 +1339,9 @@ impl AppState {
             completed: buf.completed,
             completed_at: buf.completed_at,
             created_at: buf.created_at,
+            // Ignored by `task_repo::update`, which always stamps its own
+            // `Utc::now()` — no real value to put here.
+            updated_at: buf.created_at,
             estimated_minutes: buf.estimated_minutes,
             recurrence: buf.recurrence,
         };
@@ -1313,6 +1446,9 @@ impl AppState {
                 .find(|p| p.id == buf.id)
                 .map(|p| p.created_at)
                 .unwrap_or_else(Utc::now),
+            // Ignored by `project_repo::update`, which always stamps its
+            // own `Utc::now()` — no real value to put here.
+            updated_at: Utc::now(),
         };
         if let Err(e) = project_repo::update(&self.conn, &project) {
             self.error_message = Some(e.to_string());
@@ -2539,5 +2675,32 @@ mod tests {
         state.refresh_if_date_changed();
 
         assert!(state.visible_tasks.is_empty());
+    }
+
+    #[test]
+    fn run_sync_without_a_configured_folder_sets_a_status_and_does_nothing() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+
+        state.run_sync();
+
+        assert!(!state.sync_busy);
+        assert!(state.sync_pending.is_none());
+        assert!(state.sync_status.is_some());
+    }
+
+    #[test]
+    fn run_sync_bails_out_for_an_in_memory_database() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        settings_repo::set(&state.conn, "sync_folder_path", "/tmp/wherever").unwrap();
+
+        state.run_sync();
+
+        assert!(!state.sync_busy);
+        assert!(state.sync_pending.is_none());
+        let status = state.sync_status.as_deref().unwrap_or_default();
+        assert!(
+            status.contains("isn't available"),
+            "unexpected status: {status}"
+        );
     }
 }

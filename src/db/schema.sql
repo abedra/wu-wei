@@ -6,7 +6,8 @@ CREATE TABLE IF NOT EXISTS projects (
     notes       TEXT NOT NULL DEFAULT '',
     status      TEXT NOT NULL DEFAULT 'active',
     kind        TEXT NOT NULL DEFAULT 'parallel',
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT        -- stamped by project_repo::create/update; used by sync to break edit conflicts
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -19,6 +20,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed           INTEGER NOT NULL DEFAULT 0,
     completed_at        TEXT,
     created_at          TEXT NOT NULL,
+    updated_at          TEXT,       -- stamped by task_repo::create/update; used by sync to break edit conflicts
     estimated_minutes   INTEGER,
     recurrence_interval INTEGER,
     recurrence_unit     TEXT        -- 'days' | 'weeks' | 'months'; NULL = not recurring
@@ -38,4 +40,16 @@ CREATE INDEX IF NOT EXISTS idx_tasks_completed   ON tasks(completed);
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY NOT NULL,
     value TEXT NOT NULL
+);
+
+-- Sync's own bookkeeping (see `sync.rs`/`db::sync_repo`): local delete
+-- calls (`task_repo`/`project_repo`'s `delete`/`delete_completed`) are and
+-- remain hard deletes — this just additionally records that one happened,
+-- so a sync run has something to tell other devices about. `kind` is
+-- "task" or "project".
+CREATE TABLE IF NOT EXISTS sync_tombstones (
+    kind       TEXT NOT NULL,
+    id         TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    PRIMARY KEY (kind, id)
 );

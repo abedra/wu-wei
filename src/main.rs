@@ -5,6 +5,7 @@ mod desktop_install;
 mod domain;
 mod llm;
 mod state;
+mod sync;
 mod ui;
 
 use app::WuWeiApp;
