@@ -446,7 +446,9 @@ impl AppState {
     /// Enter in the quick-capture popup: sends the raw text to the configured
     /// LLM on a background thread to extract structured fields, instead of
     /// capturing it literally. Falls back to a plain `quick_capture_submit`
-    /// if no provider is configured, so this is always safe to call.
+    /// if no provider is configured, so this is always safe to call. Shift+
+    /// Enter bypasses this and calls `quick_capture_submit` directly, for
+    /// when AI parsing would just get in the way.
     pub fn quick_capture_submit_with_ai(&mut self) {
         let Some(config) = self.llm_config.clone() else {
             self.quick_capture_submit();

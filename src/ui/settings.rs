@@ -48,6 +48,10 @@ const SHORTCUT_GROUPS: &[(&str, &[(&str, &str)])] = &[
         "Creating",
         &[
             ("Cmd+N", "New task (quick capture)"),
+            (
+                "Shift+Enter",
+                "In quick capture: add literally, skipping AI parsing",
+            ),
             ("Cmd+Shift+N", "New project"),
         ],
     ),

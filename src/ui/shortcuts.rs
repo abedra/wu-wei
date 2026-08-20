@@ -107,13 +107,21 @@ fn handle_perspective_switches(ctx: &egui::Context, state: &mut AppState) {
 
 /// Cmd+N pops open the quick-capture window and focuses its field. While
 /// open, it owns Enter (submit, parsed by AI when one is configured — see
-/// `AppState::quick_capture_submit_with_ai`) and Escape (cancel) — this is
-/// why it's checked first in `handle`, ahead of the other any-picker-open
-/// handlers.
+/// `AppState::quick_capture_submit_with_ai`), Shift+Enter (submit literally,
+/// bypassing AI parsing even when one is configured — see
+/// `AppState::quick_capture_submit`), and Escape (cancel) — this is why it's
+/// checked first in `handle`, ahead of the other any-picker-open handlers.
 fn handle_quick_capture(ctx: &egui::Context, state: &mut AppState) {
     if state.quick_capture_open {
         if state.llm_busy {
             return;
+        }
+        // `consume_key` ignores extra Shift/Alt modifiers when matching (like
+        // `consume_shortcut`), so Shift+Enter must be checked before the
+        // less-specific plain Enter — otherwise plain Enter would consume the
+        // keypress first and Shift+Enter could never fire.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Enter)) {
+            state.quick_capture_submit();
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
             state.quick_capture_submit_with_ai();

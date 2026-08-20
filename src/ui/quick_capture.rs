@@ -47,7 +47,9 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                     ui.weak("Asking the AI to parse this...");
                 });
             } else if llm_available {
-                ui.label("Enter to add (parsed by AI) - Esc to cancel");
+                ui.label(
+                    "Enter to add (parsed by AI) - Shift+Enter to add literally - Esc to cancel",
+                );
             } else {
                 ui.label("Enter to add - Esc to cancel");
             }
