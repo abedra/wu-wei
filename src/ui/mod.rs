@@ -1,4 +1,5 @@
 pub mod ai_chat;
+pub mod archive_confirm;
 pub mod due_date_picker;
 pub mod icon;
 pub mod new_project;

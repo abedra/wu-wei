@@ -36,6 +36,7 @@ impl eframe::App for WuWeiApp {
         ui::quick_capture::draw(&ctx, &mut self.state);
         ui::new_project::draw(&ctx, &mut self.state);
         ui::settings::draw(&ctx, &mut self.state);
+        ui::archive_confirm::draw(&ctx, &mut self.state);
 
         egui::Panel::left("sidebar")
             .resizable(true)

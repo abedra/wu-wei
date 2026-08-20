@@ -244,6 +244,12 @@ pub struct AppState {
     /// inspect), but can also be toggled directly regardless of selection
     /// (the info button — see `AppState::toggle_detail_panel`).
     pub detail_panel_open: bool,
+    /// Whether the "Archive Completed" confirmation is open (see
+    /// `ui::archive_confirm`, triggered by a button shown only in the
+    /// Completed view). Deleting completed tasks is permanent — this is the
+    /// one bulk, irreversible action reachable from a button rather than a
+    /// single-item Cmd+Backspace, hence the extra confirmation step.
+    pub archive_confirm_open: bool,
     pub error_message: Option<String>,
     /// The Settings screen's draft, if it's currently open (toggled by
     /// Cmd+, — see `ui::shortcuts`/`ui::settings`). `None` when closed; a
@@ -293,6 +299,7 @@ impl AppState {
             due_date_picker: None,
             sidebar_focused: false,
             detail_panel_open: false,
+            archive_confirm_open: false,
             error_message: None,
             settings: None,
             llm_config: LlmConfig::resolve(&llm_settings),
@@ -951,6 +958,31 @@ impl AppState {
             || self.quick_capture_open
             || self.new_project_popup_open
             || self.settings.is_some()
+            || self.archive_confirm_open
+    }
+
+    /// Opens the "Archive Completed" confirmation (see `ui::archive_confirm`)
+    /// — the button that triggers this only appears in the Completed view.
+    pub fn open_archive_confirm(&mut self) {
+        self.archive_confirm_open = true;
+    }
+
+    pub fn close_archive_confirm(&mut self) {
+        self.archive_confirm_open = false;
+    }
+
+    /// Permanently deletes every completed task — there is no undo. Clears
+    /// the selection/highlight unconditionally first: the button that leads
+    /// here only shows in the Completed view, where everything visible is
+    /// about to be deleted anyway.
+    pub fn confirm_archive_completed(&mut self) {
+        self.archive_confirm_open = false;
+        self.highlighted_task = None;
+        self.clear_selection();
+        if let Err(e) = task_repo::delete_completed(&self.conn) {
+            self.error_message = Some(e.to_string());
+        }
+        self.refresh_visible_tasks();
     }
 
     /// Opens the Settings screen, seeding its draft from whatever's actually
@@ -2389,5 +2421,70 @@ mod tests {
         assert_eq!(state.visible_tasks.len(), 0);
         assert_eq!(state.perspective, Perspective::Inbox);
         assert_eq!(state.selection, Selection::None);
+    }
+
+    #[test]
+    fn confirm_archive_completed_permanently_deletes_completed_tasks_only() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "keep me".to_string();
+        state.quick_capture_submit();
+        state.quick_entry_buffer = "archive me".to_string();
+        state.quick_capture_submit();
+        let to_complete = state
+            .visible_tasks
+            .iter()
+            .find(|t| t.title == "archive me")
+            .unwrap()
+            .id;
+        state.toggle_complete(to_complete, true);
+
+        state.set_perspective(Perspective::Completed);
+        assert_eq!(state.visible_tasks.len(), 1);
+
+        state.open_archive_confirm();
+        assert!(state.archive_confirm_open);
+        state.confirm_archive_completed();
+
+        assert!(!state.archive_confirm_open);
+        assert_eq!(state.visible_tasks.len(), 0);
+
+        let all = task_repo::list_all(&state.conn).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].title, "keep me");
+    }
+
+    #[test]
+    fn close_archive_confirm_leaves_completed_tasks_in_place() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "done thing".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        state.toggle_complete(task_id, true);
+        state.set_perspective(Perspective::Completed);
+
+        state.open_archive_confirm();
+        state.close_archive_confirm();
+
+        assert!(!state.archive_confirm_open);
+        assert_eq!(state.visible_tasks.len(), 1);
+        let all = task_repo::list_all(&state.conn).unwrap();
+        assert_eq!(all.len(), 1);
+    }
+
+    #[test]
+    fn confirm_archive_completed_closes_the_detail_panel_for_a_deleted_task() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "done thing".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        state.toggle_complete(task_id, true);
+        state.set_perspective(Perspective::Completed);
+        state.select_task(task_id);
+        assert_eq!(state.selection, Selection::Task(task_id));
+
+        state.confirm_archive_completed();
+
+        assert_eq!(state.selection, Selection::None);
+        assert!(!state.detail_panel_open);
     }
 }

@@ -13,6 +13,7 @@ pub fn handle(ctx: &egui::Context, state: &mut AppState) {
     handle_new_project_popup(ctx, state);
     handle_quick_capture(ctx, state);
     handle_settings(ctx, state);
+    handle_archive_confirm(ctx, state);
     handle_project_picker(ctx, state);
     handle_due_date_picker(ctx, state);
     handle_sidebar_navigation(ctx, state);
@@ -42,6 +43,21 @@ fn handle_settings(ctx: &egui::Context, state: &mut AppState) {
     let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Comma);
     if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
         state.open_settings();
+    }
+}
+
+/// Enter confirms, Escape cancels — only reachable by clicking the Archive
+/// Completed button (see `ui::task_list`), so there's no "open" shortcut to
+/// handle here, unlike the other popups.
+fn handle_archive_confirm(ctx: &egui::Context, state: &mut AppState) {
+    if !state.archive_confirm_open {
+        return;
+    }
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+        state.confirm_archive_completed();
+    }
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        state.close_archive_confirm();
     }
 }
 

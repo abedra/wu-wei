@@ -4,10 +4,19 @@ use egui_extras::{Column, TableBuilder};
 
 use crate::domain::project::ProjectId;
 use crate::domain::task::TaskId;
-use crate::state::{AppState, Selection};
+use crate::state::{AppState, Perspective, Selection};
 use crate::ui::theme;
 
 pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
+    if state.perspective == Perspective::Completed && !state.visible_tasks.is_empty() {
+        ui.horizontal(|ui| {
+            if ui.button("Archive Completed").clicked() {
+                state.open_archive_confirm();
+            }
+        });
+        ui.add_space(4.0);
+    }
+
     let project_name = |id: Option<ProjectId>, state: &AppState| -> String {
         match id {
             None => "Inbox".to_string(),

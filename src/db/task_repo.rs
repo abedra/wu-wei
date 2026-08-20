@@ -62,6 +62,13 @@ pub fn delete(conn: &Connection, id: TaskId) -> DbResult<()> {
     Ok(())
 }
 
+/// Permanently deletes every completed task — the "Archive Completed"
+/// action in the Completed view. Returns how many were removed.
+pub fn delete_completed(conn: &Connection) -> DbResult<usize> {
+    let rows = conn.execute("DELETE FROM tasks WHERE completed = 1", [])?;
+    Ok(rows)
+}
+
 pub fn get(conn: &Connection, id: TaskId) -> DbResult<Option<Task>> {
     conn.query_row(
         "SELECT id, title, notes, project_id, due_date, defer_date,
@@ -288,6 +295,26 @@ mod tests {
         let open = list_open(&conn).unwrap();
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].title, "open");
+    }
+
+    #[test]
+    fn delete_completed_removes_only_completed_tasks_and_reports_the_count() {
+        let conn = db::open_in_memory().unwrap();
+        let open_task = Task::new_inbox("open");
+        create(&conn, &open_task).unwrap();
+        let mut done_task_1 = Task::new_inbox("done 1");
+        done_task_1.completed = true;
+        create(&conn, &done_task_1).unwrap();
+        let mut done_task_2 = Task::new_inbox("done 2");
+        done_task_2.completed = true;
+        create(&conn, &done_task_2).unwrap();
+
+        let removed = delete_completed(&conn).unwrap();
+
+        assert_eq!(removed, 2);
+        let remaining = list_all(&conn).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].title, "open");
     }
 
     #[test]
