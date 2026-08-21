@@ -15,7 +15,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState, logo: &egui::TextureHandle)
             // The info button: shows/hides the detail panel regardless of
             // selection (it otherwise opens and closes automatically).
             if ui
-                .selectable_label(state.detail_panel_open, "Details")
+                .button("ℹ")
                 .on_hover_text("Toggle the detail panel")
                 .clicked()
             {
