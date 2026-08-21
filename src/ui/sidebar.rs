@@ -36,6 +36,9 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState, logo: &egui::TextureHandle)
             }
         });
     });
+    if let Some(status) = &state.sync_status {
+        ui.label(egui::RichText::new(status).small().weak());
+    }
     ui.add_space(8.0);
 
     let entries = state.sidebar_entries();
