@@ -125,6 +125,41 @@ pub fn enso_icns(color: egui::Color32) -> Vec<u8> {
     icns
 }
 
+/// The same mark as [`enso_rgba`], packaged as a Windows `.ico` — for the
+/// icon a Start Menu shortcut points at (see `install-desktop` on Windows).
+/// Modern `.ico` entries may carry PNG data directly (supported since Vista),
+/// so this reuses [`enso_png`] instead of hand-rolling BMP/DIB encoding.
+pub fn enso_ico(color: egui::Color32) -> Vec<u8> {
+    const SIZES: &[u32] = &[16, 32, 48, 256];
+
+    let images: Vec<Vec<u8>> = SIZES.iter().map(|&size| enso_png(size, color)).collect();
+
+    let mut ico = Vec::new();
+    ico.extend_from_slice(&0u16.to_le_bytes()); // reserved
+    ico.extend_from_slice(&1u16.to_le_bytes()); // type: icon
+    ico.extend_from_slice(&(SIZES.len() as u16).to_le_bytes());
+
+    // ICONDIR (6 bytes) + one ICONDIRENTRY (16 bytes) per image, then the
+    // image payloads themselves in the same order.
+    let mut offset = (6 + 16 * SIZES.len()) as u32;
+    for (size, png) in SIZES.iter().zip(&images) {
+        let dim = if *size >= 256 { 0u8 } else { *size as u8 }; // 0 means 256
+        ico.push(dim);
+        ico.push(dim);
+        ico.push(0); // color count (not palette-based)
+        ico.push(0); // reserved
+        ico.extend_from_slice(&1u16.to_le_bytes()); // color planes
+        ico.extend_from_slice(&32u16.to_le_bytes()); // bits per pixel
+        ico.extend_from_slice(&(png.len() as u32).to_le_bytes());
+        ico.extend_from_slice(&offset.to_le_bytes());
+        offset += png.len() as u32;
+    }
+    for png in &images {
+        ico.extend_from_slice(png);
+    }
+    ico
+}
+
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)

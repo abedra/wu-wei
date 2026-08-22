@@ -6,7 +6,9 @@ fn config_dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").expect("HOME must be set");
+            let home = std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .expect("HOME (or USERPROFILE on Windows) must be set");
             PathBuf::from(home).join(".config")
         })
         .join("wu-wei")

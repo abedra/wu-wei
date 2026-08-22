@@ -15,7 +15,7 @@ help:
 	@echo "  run             run the app (cargo run)"
 	@echo "  build           debug build"
 	@echo "  release         release build"
-	@echo "  install-desktop register the app so switchers/docks show the logo (Linux .desktop / macOS .app)"
+	@echo "  install-desktop register the app so switchers/docks show the logo (Linux .desktop / macOS .app / Windows Start Menu)"
 	@echo "  test            run the test suite"
 	@echo "  fmt             apply rustfmt"
 	@echo "  fmt-check       check formatting without writing changes"
@@ -46,9 +46,9 @@ release:
 
 ## Registers the app with the host desktop so task switchers/docks resolve a
 ## real icon instead of a generic placeholder: an XDG `.desktop` entry on
-## Linux, an `.app` bundle under ~/Applications on macOS. Both point at the
-## release binary, not a `cargo run` debug artifact `cargo clean` would delete
-## out from under them.
+## Linux, an `.app` bundle under ~/Applications on macOS, a Start Menu
+## shortcut on Windows. All point at the release binary, not a `cargo run`
+## debug artifact `cargo clean` would delete out from under them.
 install-desktop: release
 	./target/release/wu-wei install-desktop
 

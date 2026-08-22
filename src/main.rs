@@ -1,3 +1,9 @@
+// Rust binaries are console-subsystem by default on Windows, so launching
+// the GUI normally would pop up an attached console window alongside it.
+// Suppress that in release builds only — debug builds (`cargo run`/`make
+// run`) keep the console so panics and eprintln! output stay visible.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod db;
 mod db_bootstrap;

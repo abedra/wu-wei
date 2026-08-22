@@ -15,11 +15,13 @@ pub const APP_ID: &str = "wu-wei";
 /// should be a stable path to the binary (a release build, not a `cargo run`
 /// debug artifact that `cargo clean` will delete). Dispatches to the native
 /// mechanism for the platform: XDG `.desktop` entries on Linux, an `.app`
-/// bundle on macOS.
+/// bundle on macOS, a Start Menu shortcut on Windows.
 pub fn run(exe: &str) {
     #[cfg(target_os = "macos")]
     run_macos(exe);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    run_windows(exe);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     run_linux(exe);
 }
 
@@ -115,11 +117,79 @@ fn run_macos(exe: &str) {
     println!("installed {}", bundle.display());
 }
 
+/// Creates a Start Menu shortcut so the app shows up in the Start Menu and
+/// taskbar search with a real name and icon instead of being launched from a
+/// terminal. The running window's own taskbar/Alt-Tab icon is already set at
+/// runtime via `with_icon()` in `main.rs`; what a shortcut adds is a
+/// launchable entry point and an icon for that entry point itself, which
+/// Windows draws from the `.ico` file the shortcut points at (there's no
+/// icon resource embedded in the `.exe`). `std` has no shortcut-creation API,
+/// so this shells out to the `WScript.Shell` COM object via PowerShell — the
+/// same "reach for the platform's own tool" approach `run_macos` and
+/// `run_linux` use for `lsregister` / `update-desktop-database`, except here
+/// it's the install mechanism itself rather than a best-effort nudge, so
+/// failures are fatal instead of swallowed.
+#[cfg(target_os = "windows")]
+fn run_windows(exe: &str) {
+    let start_menu = PathBuf::from(
+        std::env::var_os("APPDATA")
+            .expect("APPDATA must be set to install a Start Menu shortcut"),
+    )
+    .join(r"Microsoft\Windows\Start Menu\Programs");
+    fs::create_dir_all(&start_menu).expect("failed to create Start Menu Programs directory");
+
+    let icon_dir = PathBuf::from(
+        std::env::var_os("LOCALAPPDATA")
+            .expect("LOCALAPPDATA must be set to install a Start Menu shortcut"),
+    )
+    .join("wu-wei");
+    fs::create_dir_all(&icon_dir).expect("failed to create icon directory");
+    let icon_path = icon_dir.join(format!("{APP_ID}.ico"));
+    fs::write(&icon_path, icon::enso_ico(theme::ACCENT)).expect("failed to write .ico file");
+
+    // A shortcut with no working directory set launches with an arbitrary
+    // (often unwritable, e.g. System32) cwd, so the default relative
+    // `wu_wei.db` fails to open and the app panics before showing a window —
+    // the same class of bug `run_macos` works around by pinning an absolute
+    // db path into its launcher shim. Shortcuts carry a working directory
+    // natively, so pinning it to the install-time directory (where the
+    // existing relative `wu_wei.db` already lives) is enough here.
+    let working_dir = std::env::current_dir()
+        .expect("failed to resolve current directory")
+        .to_string_lossy()
+        .into_owned();
+
+    let shortcut_path = start_menu.join("Wu Wei.lnk");
+    let script = format!(
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{shortcut}'); \
+         $s.TargetPath = '{target}'; \
+         $s.IconLocation = '{icon}'; \
+         $s.WorkingDirectory = '{working_dir}'; \
+         $s.Save()",
+        shortcut = shortcut_path.display(),
+        target = exe,
+        icon = icon_path.display(),
+    );
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .status()
+        .expect("failed to run powershell to create the Start Menu shortcut");
+    if !status.success() {
+        panic!("powershell exited with {status} while creating the Start Menu shortcut");
+    }
+
+    println!(
+        "installed {} and {}",
+        shortcut_path.display(),
+        icon_path.display()
+    );
+}
+
 /// Writes a `.desktop` entry and an icon file into the user's XDG data
 /// directories so the desktop shell can find both. `exe` should be a stable
 /// path to the binary (a release build, not a `cargo run` debug artifact
 /// that `cargo clean` will delete).
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn run_linux(exe: &str) {
     let data_home = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
