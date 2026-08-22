@@ -232,6 +232,14 @@ impl ProjectEditBuffer {
     }
 }
 
+/// One action the AI proposed but hasn't applied yet, paired with the
+/// human-readable description shown in the confirmation prompt (see
+/// `AppState::pending_chat_actions`).
+pub struct PendingChatAction {
+    pub action: ChatAction,
+    pub description: String,
+}
+
 pub struct AppState {
     pub conn: Connection,
     pub projects: Vec<Project>,
@@ -319,6 +327,13 @@ pub struct AppState {
     /// input field and clears it, so the next message can be typed
     /// immediately without reaching for the mouse.
     pub chat_focus_requested: bool,
+    /// Actions the AI proposed in its last reply that haven't been applied
+    /// yet — the model is unreliable about only proposing a change when one
+    /// was actually asked for (see `AppState::receive_chat_reply`), so
+    /// nothing in this list touches the database until the user explicitly
+    /// confirms via `confirm_pending_chat_actions` (or discards it via
+    /// `discard_pending_chat_actions`). Empty means nothing is pending.
+    pub pending_chat_actions: Vec<PendingChatAction>,
     /// Set while a background sync run is in flight; polled once per frame
     /// in `poll_sync`. Same shape as `llm_pending`/`llm_busy`.
     pub sync_pending: Option<Receiver<Result<SyncSummary, String>>>,
@@ -375,6 +390,7 @@ impl AppState {
             chat_pending: None,
             chat_busy: false,
             chat_focus_requested: false,
+            pending_chat_actions: Vec::new(),
             sync_pending: None,
             sync_busy: false,
             sync_status: None,
@@ -730,6 +746,11 @@ impl AppState {
         if text.is_empty() || self.chat_busy {
             return;
         }
+        // Moving the conversation forward without confirming supersedes
+        // whatever was proposed last turn — quietly drop it rather than
+        // leaving it to be confirmed by a click that's about a different
+        // reply by the time it lands.
+        self.pending_chat_actions.clear();
         self.chat_input.clear();
         self.chat_history.push(ChatTurn {
             role: ChatRole::User,
@@ -787,7 +808,7 @@ impl AppState {
                 self.chat_pending = None;
                 self.chat_busy = false;
                 self.chat_focus_requested = true;
-                self.apply_chat_reply(reply);
+                self.receive_chat_reply(reply);
             }
             Ok(Err(e)) => {
                 self.chat_pending = None;
@@ -807,34 +828,54 @@ impl AppState {
         }
     }
 
-    /// Executes every action the model requested, appends its reply (plus a
-    /// short note about any actions that failed) to the transcript, and
-    /// refreshes the cached task/project lists once for the whole batch
-    /// rather than after each individual action.
-    fn apply_chat_reply(&mut self, reply: ChatReply) {
-        let mut done = Vec::new();
+    /// Turns a model reply into a preview instead of acting on it: the
+    /// model's prose, plus — when it proposed changes — a plain-language
+    /// description of what those changes would be, appended to the
+    /// transcript as one assistant turn. Nothing in `reply.actions` touches
+    /// the database here. The model has repeatedly proposed changes for
+    /// messages that were really just questions (e.g. "how about the whole
+    /// weekend?", asked right after "what's on my list today?", once came
+    /// back as a batch of unrelated recurrence changes), so every proposal
+    /// waits in `pending_chat_actions` for `confirm_pending_chat_actions`
+    /// (or `discard_pending_chat_actions`) regardless of how confident the
+    /// model's own wording was.
+    fn receive_chat_reply(&mut self, reply: ChatReply) {
         let mut failures = reply.parse_failures;
+        let mut pending = Vec::new();
+        // A project a `CreateProject` earlier in this same reply would make
+        // — describing (never applying) each action in order still needs to
+        // recognize it as valid for a later action in the same batch (e.g.
+        // "create a Taxes project and move the W2 task into it"), even
+        // though `self.projects` itself won't have it until confirmed.
+        let mut projects_created_this_reply: Vec<String> = Vec::new();
         for action in reply.actions {
-            match self.apply_chat_action(action) {
-                Ok(description) => done.push(description),
+            match self.describe_chat_action(&action, &projects_created_this_reply) {
+                Ok(description) => {
+                    if let ChatAction::CreateProject { name } = &action {
+                        projects_created_this_reply.push(name.clone());
+                    }
+                    pending.push(PendingChatAction { action, description });
+                }
                 Err(e) => failures.push(e),
             }
         }
         let mut content = reply.reply;
-        if !done.is_empty() {
-            // Factual, independent of whatever the reply text above claims —
-            // the model's prose can describe an action it never actually
-            // included (see `failures` below for the ones it attempted but
-            // got wrong; this covers ones it didn't attempt at all).
-            content.push_str("\n\nActions taken: ");
-            content.push_str(&done.join("; "));
-            content.push('.');
+        if !pending.is_empty() {
+            content.push_str("\n\nThis would: ");
+            content.push_str(
+                &pending
+                    .iter()
+                    .map(|p| p.description.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            );
+            content.push_str(". Apply to confirm, or Discard to skip.");
         }
         if !failures.is_empty() {
-            // The reply text above may claim something happened that this
-            // list contradicts (the model describing an action it failed to
-            // fill in correctly) — say plainly that it didn't happen, rather
-            // than a bare parenthetical that reads as a footnote.
+            // The reply text above may claim something the model didn't
+            // actually manage to propose correctly — say plainly that it
+            // won't happen, rather than a bare parenthetical that reads as a
+            // footnote.
             let prefix = if failures.len() == 1 {
                 "This didn't actually happen: "
             } else {
@@ -848,8 +889,64 @@ impl AppState {
             role: ChatRole::Assistant,
             content,
         });
+        self.pending_chat_actions = pending;
+    }
+
+    /// Applies every currently pending action (see `pending_chat_actions`),
+    /// appending a factual "Actions taken"/failure summary as a new
+    /// assistant turn — independent of whatever the original reply's prose
+    /// claimed. No-op if nothing is pending.
+    pub fn confirm_pending_chat_actions(&mut self) {
+        let pending = std::mem::take(&mut self.pending_chat_actions);
+        if pending.is_empty() {
+            return;
+        }
+        let mut done = Vec::new();
+        let mut failures = Vec::new();
+        for pending_action in pending {
+            match self.apply_chat_action(pending_action.action) {
+                Ok(description) => done.push(description),
+                Err(e) => failures.push(e),
+            }
+        }
+        let mut content = String::new();
+        if !done.is_empty() {
+            content.push_str("Actions taken: ");
+            content.push_str(&done.join("; "));
+            content.push('.');
+        }
+        if !failures.is_empty() {
+            if !content.is_empty() {
+                content.push_str("\n\n");
+            }
+            let prefix = if failures.len() == 1 {
+                "This didn't actually happen: "
+            } else {
+                "These didn't actually happen: "
+            };
+            content.push_str("⚠ ");
+            content.push_str(prefix);
+            content.push_str(&failures.join("; "));
+        }
+        self.chat_history.push(ChatTurn {
+            role: ChatRole::Assistant,
+            content,
+        });
         self.refresh_visible_tasks();
         self.refresh_projects();
+    }
+
+    /// Discards every currently pending action without applying any of
+    /// them. No-op if nothing is pending.
+    pub fn discard_pending_chat_actions(&mut self) {
+        if self.pending_chat_actions.is_empty() {
+            return;
+        }
+        self.pending_chat_actions.clear();
+        self.chat_history.push(ChatTurn {
+            role: ChatRole::Assistant,
+            content: "Okay, I didn't make any changes.".to_string(),
+        });
     }
 
     fn task_title(&self, task_id: TaskId) -> Result<String, String> {
@@ -859,11 +956,115 @@ impl AppState {
             .ok_or_else(|| "no task with that id".to_string())
     }
 
+    /// Read-only counterpart to `apply_chat_action`, used to build the
+    /// confirmation preview in `receive_chat_reply` before the user has
+    /// agreed to anything. Resolves and validates the same targets it does
+    /// (unknown task/project, a duplicate project name, ...) so a proposal
+    /// that's actually going to fail is reported as a failure immediately
+    /// rather than waiting for a confirm that was never going to work, but
+    /// never performs the underlying database write.
+    fn describe_chat_action(
+        &self,
+        action: &ChatAction,
+        projects_created_this_reply: &[String],
+    ) -> Result<String, String> {
+        let project_exists = |name: &str| {
+            self.projects.iter().any(|p| p.name.eq_ignore_ascii_case(name))
+                || projects_created_this_reply
+                    .iter()
+                    .any(|p| p.eq_ignore_ascii_case(name))
+        };
+        match action {
+            ChatAction::SetDueDate { task_id, due_date } => {
+                let title = self.task_title(*task_id)?;
+                Ok(format!("set the due date on \"{title}\" to {due_date}"))
+            }
+            ChatAction::ClearDueDate { task_id } => {
+                let title = self.task_title(*task_id)?;
+                Ok(format!("clear the due date on \"{title}\""))
+            }
+            ChatAction::SetRecurrence {
+                task_id,
+                recurrence,
+            } => {
+                let title = self.task_title(*task_id)?;
+                let unit = match recurrence.unit {
+                    RecurrenceUnit::Days => "day(s)",
+                    RecurrenceUnit::Weeks => "week(s)",
+                    RecurrenceUnit::Months => "month(s)",
+                };
+                Ok(format!(
+                    "set \"{title}\" to repeat every {} {unit}",
+                    recurrence.interval
+                ))
+            }
+            ChatAction::ClearRecurrence { task_id } => {
+                let title = self.task_title(*task_id)?;
+                Ok(format!("stop \"{title}\" from repeating"))
+            }
+            ChatAction::CompleteTask { task_id } => {
+                let title = self.task_title(*task_id)?;
+                Ok(format!("complete \"{title}\""))
+            }
+            ChatAction::ReopenTask { task_id } => {
+                let title = self.task_title(*task_id)?;
+                Ok(format!("reopen \"{title}\""))
+            }
+            ChatAction::MoveToProject { task_id, project } => {
+                let title = self.task_title(*task_id)?;
+                if !project_exists(project) {
+                    return Err(format!("no project named {project:?}"));
+                }
+                Ok(format!("move \"{title}\" to {project}"))
+            }
+            ChatAction::MoveToInbox { task_id } => {
+                let title = self.task_title(*task_id)?;
+                Ok(format!("move \"{title}\" to Inbox"))
+            }
+            ChatAction::CreateTask { task } => {
+                let mut description = format!("create task \"{}\"", task.title);
+                // Mirrors `apply_chat_action`'s CreateTask: an unknown
+                // project name doesn't fail the action, it just files to
+                // the Inbox, so the preview should describe the same
+                // outcome rather than naming a project that won't be used.
+                if let Some(project_name) = task
+                    .project
+                    .as_ref()
+                    .filter(|name| project_exists(name))
+                {
+                    description.push_str(&format!(" in {project_name}"));
+                }
+                if let Some(due) = task.due_date {
+                    description.push_str(&format!(" due {due}"));
+                }
+                Ok(description)
+            }
+            ChatAction::CreateProject { name } => {
+                if project_exists(name) {
+                    return Err(format!("a project named {name:?} already exists"));
+                }
+                Ok(format!("create project \"{name}\""))
+            }
+            ChatAction::DeleteProject { project } => {
+                if !project_exists(project) {
+                    return Err(format!("no project named {project:?}"));
+                }
+                Ok(format!(
+                    "delete project \"{project}\" (its tasks move to Inbox)"
+                ))
+            }
+            ChatAction::DeleteTask { task_id } => {
+                let title = self.task_title(*task_id)?;
+                Ok(format!("permanently delete \"{title}\""))
+            }
+        }
+    }
+
     /// Task deletion is deliberately excluded (see `ChatAction`'s doc
     /// comment for why project deletion isn't held to the same bar). On
     /// success, returns a short factual description for the "Actions taken"
-    /// summary in `apply_chat_reply` — ground truth independent of the
-    /// model's own reply text.
+    /// summary in `confirm_pending_chat_actions` — ground truth independent
+    /// of the model's own reply text.
     fn apply_chat_action(&mut self, action: ChatAction) -> Result<String, String> {
         match action {
             ChatAction::SetDueDate { task_id, due_date } => {
@@ -1800,7 +2001,7 @@ mod tests {
         let task_id = state.visible_tasks[0].id;
         let today = Local::now().date_naive();
 
-        state.apply_chat_reply(ChatReply {
+        state.receive_chat_reply(ChatReply {
             reply: "Rolled it to today.".to_string(),
             actions: vec![ChatAction::SetDueDate {
                 task_id,
@@ -1821,7 +2022,15 @@ mod tests {
                 .content
                 .contains("set the due date on \"overdue task\"")
         );
+        assert_eq!(state.pending_chat_actions.len(), 1);
 
+        // Nothing actually happens until the user confirms.
+        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert_eq!(task.due_date, None);
+
+        state.confirm_pending_chat_actions();
+
+        assert!(state.pending_chat_actions.is_empty());
         let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
         assert_eq!(task.due_date, Some(today));
     }
@@ -1837,7 +2046,7 @@ mod tests {
         state.quick_capture_submit();
         let task_id = state.visible_tasks[0].id;
 
-        state.apply_chat_reply(ChatReply {
+        state.receive_chat_reply(ChatReply {
             reply: "Moved it.".to_string(),
             actions: vec![ChatAction::MoveToProject {
                 task_id,
@@ -1845,6 +2054,7 @@ mod tests {
             }],
             parse_failures: Vec::new(),
         });
+        state.confirm_pending_chat_actions();
 
         let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
         assert_eq!(task.project_id, Some(project_id));
@@ -1857,7 +2067,7 @@ mod tests {
         state.quick_capture_submit();
         let task_id = state.visible_tasks[0].id;
 
-        state.apply_chat_reply(ChatReply {
+        state.receive_chat_reply(ChatReply {
             reply: "Moved it.".to_string(),
             actions: vec![ChatAction::MoveToProject {
                 task_id,
@@ -1866,6 +2076,9 @@ mod tests {
             parse_failures: Vec::new(),
         });
 
+        // Caught immediately (no task/project matched), no confirmation
+        // needed for something that was never going to succeed.
+        assert!(state.pending_chat_actions.is_empty());
         assert!(state.chat_history[0].content.contains("no project named"));
         let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
         assert!(task.project_id.is_none());
@@ -1886,11 +2099,12 @@ mod tests {
         });
         state.save_task_edits();
 
-        state.apply_chat_reply(ChatReply {
+        state.receive_chat_reply(ChatReply {
             reply: "Done.".to_string(),
             actions: vec![ChatAction::CompleteTask { task_id }],
             parse_failures: Vec::new(),
         });
+        state.confirm_pending_chat_actions();
 
         let all = task_repo::list_all(&state.conn).unwrap();
         assert_eq!(all.len(), 2);
@@ -1903,15 +2117,18 @@ mod tests {
         state.quick_capture_submit();
         let task_id = state.visible_tasks[0].id;
 
-        state.apply_chat_reply(ChatReply {
+        state.receive_chat_reply(ChatReply {
             reply: "Deleted it.".to_string(),
             actions: vec![ChatAction::DeleteTask { task_id }],
             parse_failures: Vec::new(),
         });
+        assert!(task_repo::get(&state.conn, task_id).unwrap().is_some());
+
+        state.confirm_pending_chat_actions();
 
         assert!(task_repo::get(&state.conn, task_id).unwrap().is_none());
         assert!(
-            state.chat_history[0]
+            state.chat_history[1]
                 .content
                 .contains("deleted \"obsolete task\"")
         );
@@ -1928,7 +2145,7 @@ mod tests {
         let project_id = state.projects[0].id;
         let due = chrono::NaiveDate::from_ymd_opt(2026, 8, 23).unwrap();
 
-        state.apply_chat_reply(ChatReply {
+        state.receive_chat_reply(ChatReply {
             reply: "Added it.".to_string(),
             actions: vec![ChatAction::CreateTask {
                 task: ParsedTask {
@@ -1943,6 +2160,7 @@ mod tests {
             }],
             parse_failures: Vec::new(),
         });
+        state.confirm_pending_chat_actions();
 
         state.set_perspective(Perspective::Project(project_id));
         assert_eq!(state.visible_tasks.len(), 1);
@@ -1968,7 +2186,7 @@ mod tests {
 
         let mut state = AppState::new(crate::db::open_in_memory().unwrap());
 
-        state.apply_chat_reply(ChatReply {
+        state.receive_chat_reply(ChatReply {
             reply: "Added it.".to_string(),
             actions: vec![ChatAction::CreateTask {
                 task: ParsedTask {
@@ -1980,6 +2198,7 @@ mod tests {
             }],
             parse_failures: Vec::new(),
         });
+        state.confirm_pending_chat_actions();
 
         assert_eq!(state.visible_tasks.len(), 1);
         assert!(state.visible_tasks[0].project_id.is_none());
@@ -1999,7 +2218,7 @@ mod tests {
         assert!(state.visible_tasks[0].recurrence.is_none());
         assert!(state.visible_tasks[0].due_date.is_none());
 
-        state.apply_chat_reply(ChatReply {
+        state.receive_chat_reply(ChatReply {
             reply: "Done.".to_string(),
             actions: vec![ChatAction::SetRecurrence {
                 task_id,
@@ -2010,6 +2229,7 @@ mod tests {
             }],
             parse_failures: Vec::new(),
         });
+        state.confirm_pending_chat_actions();
 
         let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
         assert_eq!(
@@ -2041,7 +2261,7 @@ mod tests {
         state.task_edit_buffer.as_mut().unwrap().due_date = Some(due);
         state.save_task_edits();
 
-        state.apply_chat_reply(ChatReply {
+        state.receive_chat_reply(ChatReply {
             reply: "Done.".to_string(),
             actions: vec![ChatAction::SetRecurrence {
                 task_id,
@@ -2052,6 +2272,7 @@ mod tests {
             }],
             parse_failures: Vec::new(),
         });
+        state.confirm_pending_chat_actions();
 
         let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
         assert_eq!(task.due_date, Some(due));
@@ -2076,11 +2297,12 @@ mod tests {
             .unwrap()
             .due_date;
 
-        state.apply_chat_reply(ChatReply {
+        state.receive_chat_reply(ChatReply {
             reply: "Done.".to_string(),
             actions: vec![ChatAction::ClearRecurrence { task_id }],
             parse_failures: Vec::new(),
         });
+        state.confirm_pending_chat_actions();
 
         let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
         assert!(task.recurrence.is_none());
@@ -2121,6 +2343,94 @@ mod tests {
     }
 
     #[test]
+    fn receive_chat_reply_stages_actions_without_touching_the_database() {
+        // Reproduces a real failure mode: a follow-up question ("how about
+        // the whole weekend?", after "what's on my list today?") came back
+        // with a batch of unrelated recurrence changes on every visible
+        // task. Whatever the model proposes, nothing should touch the
+        // database until the user actually confirms it.
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "Garage WiFi".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+
+        state.receive_chat_reply(ChatReply {
+            reply: "Here's your weekend.".to_string(),
+            actions: vec![ChatAction::SetRecurrence {
+                task_id,
+                recurrence: Recurrence {
+                    interval: 1,
+                    unit: RecurrenceUnit::Days,
+                },
+            }],
+            parse_failures: Vec::new(),
+        });
+
+        assert_eq!(state.pending_chat_actions.len(), 1);
+        assert!(
+            state.chat_history[0]
+                .content
+                .contains("set \"Garage WiFi\" to repeat every 1 day(s)")
+        );
+        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert!(task.recurrence.is_none());
+    }
+
+    #[test]
+    fn discard_pending_chat_actions_drops_them_without_applying() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "Garage WiFi".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+
+        state.receive_chat_reply(ChatReply {
+            reply: "Here's your weekend.".to_string(),
+            actions: vec![ChatAction::CompleteTask { task_id }],
+            parse_failures: Vec::new(),
+        });
+        assert_eq!(state.pending_chat_actions.len(), 1);
+
+        state.discard_pending_chat_actions();
+
+        assert!(state.pending_chat_actions.is_empty());
+        assert_eq!(state.chat_history.len(), 2);
+        assert_eq!(
+            state.chat_history[1].content,
+            "Okay, I didn't make any changes."
+        );
+        let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert!(!task.completed);
+    }
+
+    #[test]
+    fn discard_pending_chat_actions_is_a_noop_with_nothing_pending() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.discard_pending_chat_actions();
+        assert!(state.chat_history.is_empty());
+    }
+
+    #[test]
+    fn sending_a_new_message_drops_any_unconfirmed_pending_actions() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "Garage WiFi".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        state.llm_config = None; // chat_send's early-return path is enough here
+
+        state.receive_chat_reply(ChatReply {
+            reply: "Here's your weekend.".to_string(),
+            actions: vec![ChatAction::CompleteTask { task_id }],
+            parse_failures: Vec::new(),
+        });
+        assert_eq!(state.pending_chat_actions.len(), 1);
+
+        state.chat_input = "never mind".to_string();
+        state.chat_send();
+
+        assert!(state.pending_chat_actions.is_empty());
+    }
+
+    #[test]
     fn chat_send_without_config_appends_an_explanatory_message() {
         let mut state = AppState::new(crate::db::open_in_memory().unwrap());
         state.llm_config = None;
@@ -2142,7 +2452,7 @@ mod tests {
         state.quick_capture_submit();
         let task_id = state.visible_tasks[0].id;
 
-        state.apply_chat_reply(ChatReply {
+        state.receive_chat_reply(ChatReply {
             reply: "Created Taxes and filed it there.".to_string(),
             actions: vec![
                 ChatAction::CreateProject {
@@ -2155,6 +2465,11 @@ mod tests {
             ],
             parse_failures: Vec::new(),
         });
+        // Both actions described cleanly — MoveToProject resolves "Taxes"
+        // against the CreateProject earlier in the same batch even though
+        // it doesn't exist in `self.projects` yet.
+        assert_eq!(state.pending_chat_actions.len(), 2);
+        state.confirm_pending_chat_actions();
 
         assert_eq!(state.projects.len(), 1);
         assert_eq!(state.projects[0].name, "Taxes");
@@ -2168,7 +2483,7 @@ mod tests {
         state.new_project_name = "Taxes".to_string();
         state.create_project();
 
-        state.apply_chat_reply(ChatReply {
+        state.receive_chat_reply(ChatReply {
             reply: "Done.".to_string(),
             actions: vec![ChatAction::CreateProject {
                 name: "taxes".to_string(),
@@ -2176,6 +2491,9 @@ mod tests {
             parse_failures: Vec::new(),
         });
 
+        // Caught immediately, no confirmation needed for something that
+        // was never going to succeed.
+        assert!(state.pending_chat_actions.is_empty());
         assert_eq!(state.projects.len(), 1);
         assert!(state.chat_history[0].content.contains("already exists"));
     }
@@ -2193,13 +2511,14 @@ mod tests {
         let task_id = state.visible_tasks[0].id;
         state.set_perspective(Perspective::Inbox);
 
-        state.apply_chat_reply(ChatReply {
+        state.receive_chat_reply(ChatReply {
             reply: "Deleted Taxes.".to_string(),
             actions: vec![ChatAction::DeleteProject {
                 project: "Taxes".to_string(),
             }],
             parse_failures: Vec::new(),
         });
+        state.confirm_pending_chat_actions();
 
         assert!(state.projects.is_empty());
         let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
@@ -2225,16 +2544,17 @@ mod tests {
         let task_id = state.visible_tasks[0].id;
         state.set_perspective(Perspective::Inbox);
 
-        state.apply_chat_reply(ChatReply {
+        state.receive_chat_reply(ChatReply {
             reply: "Deleted project 'Recurring' and moved its tasks to Inbox.".to_string(),
             actions: vec![ChatAction::CompleteTask { task_id }],
             parse_failures: Vec::new(),
         });
+        state.confirm_pending_chat_actions();
 
         assert_eq!(state.projects.len(), 1);
         assert_eq!(state.projects[0].name, "Recurring");
         assert!(
-            state.chat_history[0]
+            state.chat_history[1]
                 .content
                 .contains("Actions taken: completed \"Read\".")
         );
@@ -2254,18 +2574,28 @@ mod tests {
         // the in-memory cache the chat handler resolves names against).
         project_repo::delete(&state.conn, project_id).unwrap();
 
-        state.apply_chat_reply(ChatReply {
+        state.receive_chat_reply(ChatReply {
             reply: "Deleted Taxes.".to_string(),
             actions: vec![ChatAction::DeleteProject {
                 project: "Taxes".to_string(),
             }],
             parse_failures: Vec::new(),
         });
+        // The stale in-memory cache still has "Taxes", so the preview
+        // describes it fine — the real failure only surfaces once confirmed
+        // and the actual database delete is attempted.
+        assert_eq!(state.pending_chat_actions.len(), 1);
+        state.confirm_pending_chat_actions();
 
         assert!(
-            !state.chat_history[0]
+            !state.chat_history[1]
                 .content
                 .contains("Actions taken: deleted")
+        );
+        assert!(
+            state.chat_history[1]
+                .content
+                .contains("This didn't actually happen")
         );
     }
 
@@ -2280,7 +2610,7 @@ mod tests {
         // Mirrors what a malformed model reply looks like once parsed: one
         // good action plus a note about the one the model got wrong,
         // instead of the whole turn being replaced by a bare error.
-        state.apply_chat_reply(ChatReply {
+        state.receive_chat_reply(ChatReply {
             reply: "Rolled it to today.".to_string(),
             actions: vec![ChatAction::SetDueDate {
                 task_id,
@@ -2298,6 +2628,9 @@ mod tests {
                 .starts_with("Rolled it to today.")
         );
         assert!(state.chat_history[0].content.contains("missing a project"));
+        assert_eq!(state.pending_chat_actions.len(), 1);
+
+        state.confirm_pending_chat_actions();
         let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
         assert_eq!(task.due_date, Some(today));
     }

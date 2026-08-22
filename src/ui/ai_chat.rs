@@ -26,6 +26,8 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
 
     let llm_available = state.llm_available();
     let mut send_clicked = false;
+    let mut apply_clicked = false;
+    let mut discard_clicked = false;
 
     // Partition the remaining space with nested panels: the input strip is
     // anchored to the bottom, and the history fills the middle. Letting inner
@@ -35,6 +37,29 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     egui::Panel::bottom("ai_chat_input")
         .frame(egui::Frame::NONE)
         .show(ui, |ui| {
+            // The AI proposes changes but never applies them itself (see
+            // `AppState::pending_chat_actions`) — it's been wrong about
+            // whether a change was even asked for often enough that nothing
+            // it proposes touches the database without this click.
+            if !state.pending_chat_actions.is_empty() {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let count = state.pending_chat_actions.len();
+                    ui.colored_label(
+                        crate::ui::theme::WARM,
+                        format!(
+                            "{count} pending change{}",
+                            if count == 1 { "" } else { "s" }
+                        ),
+                    );
+                    if ui.button("Apply").clicked() {
+                        apply_clicked = true;
+                    }
+                    if ui.button("Discard").clicked() {
+                        discard_clicked = true;
+                    }
+                });
+            }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 let enabled = llm_available && !state.chat_busy;
@@ -98,6 +123,12 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                 });
         });
 
+    if apply_clicked {
+        state.confirm_pending_chat_actions();
+    }
+    if discard_clicked {
+        state.discard_pending_chat_actions();
+    }
     if send_clicked {
         state.chat_send();
     }
