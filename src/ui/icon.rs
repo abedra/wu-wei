@@ -95,6 +95,36 @@ pub fn enso_png(size: u32, color: egui::Color32) -> Vec<u8> {
     png
 }
 
+/// The same mark as [`enso_rgba`], packaged as a macOS `.icns` — for the icon
+/// inside an installed `.app` bundle (see `install-desktop` on macOS). Bundles
+/// several PNG-encoded sizes (modern ICNS entries carry PNG data directly) so
+/// the Dock, Finder and app switcher each have a crisp source to scale from.
+pub fn enso_icns(color: egui::Color32) -> Vec<u8> {
+    // (OSType, pixel size) pairs, largest last. The `ic0*` types all accept a
+    // raw PNG payload, so no legacy ARGB packing is needed.
+    const ENTRIES: &[(&[u8; 4], u32)] = &[
+        (b"ic07", 128),
+        (b"ic08", 256),
+        (b"ic09", 512),
+        (b"ic10", 1024),
+    ];
+
+    let mut body = Vec::new();
+    for (ostype, size) in ENTRIES {
+        let png = enso_png(*size, color);
+        body.extend_from_slice(*ostype);
+        // Each entry's length field counts its own 8-byte header (type + len).
+        body.extend_from_slice(&((png.len() + 8) as u32).to_be_bytes());
+        body.extend_from_slice(&png);
+    }
+
+    let mut icns = Vec::with_capacity(body.len() + 8);
+    icns.extend_from_slice(b"icns");
+    icns.extend_from_slice(&((body.len() + 8) as u32).to_be_bytes());
+    icns.extend_from_slice(&body);
+    icns
+}
+
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)

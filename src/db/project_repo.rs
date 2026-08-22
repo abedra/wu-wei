@@ -1,4 +1,6 @@
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
+#[cfg(test)]
+use rusqlite::OptionalExtension;
 use uuid::Uuid;
 
 use super::error::{DbError, DbResult};
@@ -89,6 +91,10 @@ pub fn delete_if_exists(conn: &Connection, id: ProjectId) -> DbResult<()> {
     Ok(())
 }
 
+/// Fetches a single project by id. Only the tests need this today (production
+/// code loads projects via `list_all`), so it's gated to test builds to avoid
+/// a dead-code warning; promote to `pub` if a caller appears.
+#[cfg(test)]
 pub fn get(conn: &Connection, id: ProjectId) -> DbResult<Option<Project>> {
     conn.query_row(
         "SELECT id, name, notes, status, kind, created_at, updated_at FROM projects WHERE id = ?1",
