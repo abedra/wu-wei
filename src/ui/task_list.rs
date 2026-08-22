@@ -64,7 +64,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
         .column(Column::remainder()) // title
         .column(Column::auto().at_least(90.0)) // due date
         .column(Column::initial(project_col_width)) // project
-        .header(24.0, |mut header| {
+        .header(28.0, |mut header| {
             header.col(|ui| {
                 ui.strong("");
             });
@@ -79,7 +79,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
             });
         })
         .body(|body| {
-            body.rows(24.0, state.visible_tasks.len(), |mut row| {
+            body.rows(28.0, state.visible_tasks.len(), |mut row| {
                 let task = &state.visible_tasks[row.index()];
                 let task_id = task.id;
                 let mut completed = task.completed;
