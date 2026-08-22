@@ -199,42 +199,51 @@ pub fn list_completed(conn: &Connection) -> DbResult<Vec<Task>> {
     list_where(conn, "completed = 1", params![], "completed_at DESC")
 }
 
+/// Stamps `updated_at` to now — like every mutator here — so the change
+/// wins sync conflict resolution against another device's stale copy. Without
+/// this, completing a task left `updated_at` untouched, so a device that still
+/// had the task open (same `updated_at`) could win the merge on a tie and
+/// silently resurrect it as incomplete.
 pub fn set_completed(conn: &Connection, id: TaskId, completed: bool) -> DbResult<()> {
     let completed_at = completed.then(Utc::now);
     conn.execute(
-        "UPDATE tasks SET completed = ?2, completed_at = ?3 WHERE id = ?1",
-        params![id.0.to_string(), completed, completed_at],
+        "UPDATE tasks SET completed = ?2, completed_at = ?3, updated_at = ?4 WHERE id = ?1",
+        params![id.0.to_string(), completed, completed_at, Utc::now()],
     )?;
     Ok(())
 }
 
+/// Stamps `updated_at` to now — see `set_completed`.
 pub fn set_due_date(conn: &Connection, id: TaskId, due_date: Option<NaiveDate>) -> DbResult<()> {
     conn.execute(
-        "UPDATE tasks SET due_date = ?2 WHERE id = ?1",
-        params![id.0.to_string(), due_date],
+        "UPDATE tasks SET due_date = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id.0.to_string(), due_date, Utc::now()],
     )?;
     Ok(())
 }
 
+/// Stamps `updated_at` to now — see `set_completed`.
 pub fn set_project(conn: &Connection, id: TaskId, project_id: Option<ProjectId>) -> DbResult<()> {
     conn.execute(
-        "UPDATE tasks SET project_id = ?2 WHERE id = ?1",
-        params![id.0.to_string(), project_id.map(|p| p.0.to_string())],
+        "UPDATE tasks SET project_id = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id.0.to_string(), project_id.map(|p| p.0.to_string()), Utc::now()],
     )?;
     Ok(())
 }
 
+/// Stamps `updated_at` to now — see `set_completed`.
 pub fn set_recurrence(
     conn: &Connection,
     id: TaskId,
     recurrence: Option<Recurrence>,
 ) -> DbResult<()> {
     conn.execute(
-        "UPDATE tasks SET recurrence_interval = ?2, recurrence_unit = ?3 WHERE id = ?1",
+        "UPDATE tasks SET recurrence_interval = ?2, recurrence_unit = ?3, updated_at = ?4 WHERE id = ?1",
         params![
             id.0.to_string(),
             recurrence.map(|r| r.interval),
             recurrence.map(|r| r.unit.as_str()),
+            Utc::now(),
         ],
     )?;
     Ok(())
@@ -348,6 +357,43 @@ mod tests {
         let after_update = get(&conn, task.id).unwrap().unwrap().updated_at;
 
         assert!(after_update >= after_create);
+    }
+
+    #[test]
+    fn field_mutators_bump_updated_at_so_edits_win_sync_conflicts() {
+        // Every field-level mutation must advance `updated_at`, or a device
+        // holding a stale copy with an equal (or later) timestamp can win the
+        // merge and silently undo the edit — the completed-tasks-resurrected
+        // sync bug. `updated_at` is stored at second-ish resolution end-to-end,
+        // so sleep past a tick to make the bump observable.
+        let conn = db::open_in_memory().unwrap();
+        let project = Project::new("Errands");
+        db::project_repo::create(&conn, &project).unwrap();
+
+        for mutate in [
+            &|c: &Connection, id: TaskId| set_completed(c, id, true) as DbResult<()>,
+            &|c: &Connection, id: TaskId| set_due_date(c, id, Some(Utc::now().date_naive())),
+            &|c: &Connection, id: TaskId| set_project(c, id, Some(project.id)),
+            &|c: &Connection, id: TaskId| {
+                set_recurrence(
+                    c,
+                    id,
+                    Some(Recurrence {
+                        interval: 1,
+                        unit: RecurrenceUnit::Weeks,
+                    }),
+                )
+            },
+        ] as [&dyn Fn(&Connection, TaskId) -> DbResult<()>; 4]
+        {
+            let task = Task::new_inbox("edit me");
+            create(&conn, &task).unwrap();
+            let before = get(&conn, task.id).unwrap().unwrap().updated_at;
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            mutate(&conn, task.id).unwrap();
+            let after = get(&conn, task.id).unwrap().unwrap().updated_at;
+            assert!(after > before, "mutation did not advance updated_at");
+        }
     }
 
     #[test]

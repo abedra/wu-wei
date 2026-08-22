@@ -293,6 +293,8 @@ pub fn merge(conn: &Connection, local: &Snapshot, remotes: &[Snapshot]) -> DbRes
             .chain(remotes.iter().flat_map(|r| r.projects.iter())),
         |p| p.id.clone(),
         |p| p.updated_at,
+        // Projects have no completion state; leave ties to first-writer.
+        |_, _| false,
         &project_tombstones,
     );
     let local_project_ids: HashSet<&str> = local.projects.iter().map(|p| p.id.as_str()).collect();
@@ -308,7 +310,7 @@ pub fn merge(conn: &Connection, local: &Snapshot, remotes: &[Snapshot]) -> DbRes
     }
     for (id, version) in &project_versions {
         if already_current(&local.projects, id, version.updated_at, |p| {
-            (&p.id, p.updated_at)
+            (p.id.as_str(), p.updated_at)
         }) {
             continue;
         }
@@ -327,6 +329,10 @@ pub fn merge(conn: &Connection, local: &Snapshot, remotes: &[Snapshot]) -> DbRes
             .chain(remotes.iter().flat_map(|r| r.tasks.iter())),
         |t| t.id.clone(),
         |t| t.updated_at,
+        // A completion beats a not-completed copy at an equal timestamp — see
+        // `winning_versions`. Only fires on legacy ties; new edits all carry a
+        // distinct `updated_at`.
+        |cand, existing| cand.completed && !existing.completed,
         &task_tombstones,
     );
     let local_task_ids: HashSet<&str> = local.tasks.iter().map(|t| t.id.as_str()).collect();
@@ -341,9 +347,12 @@ pub fn merge(conn: &Connection, local: &Snapshot, remotes: &[Snapshot]) -> DbRes
         sync_repo::record_tombstone(conn, "task", id, *deleted_at)?;
     }
     for (id, version) in &task_versions {
-        if already_current(&local.tasks, id, version.updated_at, |t| {
-            (&t.id, t.updated_at)
-        }) {
+        if already_current(
+            &local.tasks,
+            id,
+            (version.updated_at, version.completed),
+            |t| (t.id.as_str(), (t.updated_at, t.completed)),
+        ) {
             continue;
         }
         if let Some(task) = version.clone().into_task(&surviving_project_ids) {
@@ -380,10 +389,19 @@ fn tombstones_by_id(
 /// The latest (by `updated_at`) version of each id across every source,
 /// excluding any id that has a tombstone — a tombstone always wins,
 /// regardless of any upsert's timestamp.
+///
+/// `prefer_on_tie(candidate, existing)` breaks an exact `updated_at` tie: when
+/// it returns true the candidate replaces the existing pick. Ties would
+/// otherwise resolve to whichever source happened to be iterated first
+/// (HashMap/directory order — nondeterministic). For tasks this makes a
+/// completed version beat a not-completed one at equal timestamps, both fixing
+/// that nondeterminism and healing data written before completion started
+/// stamping `updated_at` (see `task_repo::set_completed`).
 fn winning_versions<'a, T: Clone + 'a>(
     items: impl Iterator<Item = &'a T>,
     id_of: impl Fn(&T) -> String,
     updated_at_of: impl Fn(&T) -> DateTime<Utc>,
+    prefer_on_tie: impl Fn(&T, &T) -> bool,
     tombstones: &HashMap<String, DateTime<Utc>>,
 ) -> HashMap<String, T> {
     let mut result: HashMap<String, T> = HashMap::new();
@@ -395,7 +413,10 @@ fn winning_versions<'a, T: Clone + 'a>(
         result
             .entry(id)
             .and_modify(|existing| {
-                if updated_at_of(item) > updated_at_of(existing) {
+                let item_at = updated_at_of(item);
+                let existing_at = updated_at_of(existing);
+                if item_at > existing_at || (item_at == existing_at && prefer_on_tie(item, existing))
+                {
                     *existing = item.clone();
                 }
             })
@@ -406,16 +427,20 @@ fn winning_versions<'a, T: Clone + 'a>(
 
 /// Whether `id`'s winning version is exactly what's already stored
 /// locally — if so, `merge` skips writing it, both as a minor efficiency
-/// and so the summary only counts what actually changed.
-fn already_current<T>(
+/// and so the summary only counts what actually changed. The `fingerprint`
+/// must capture every field a tie-break in `winning_versions` can flip
+/// (e.g. a task's `completed`), or a winning version that differs only in
+/// such a field — at an equal `updated_at` — would be wrongly skipped and
+/// never applied.
+fn already_current<T, F: Eq>(
     local_items: &[T],
     id: &str,
-    winning_updated_at: DateTime<Utc>,
-    id_and_updated_at: impl Fn(&T) -> (&str, DateTime<Utc>),
+    winning_fingerprint: F,
+    id_and_fingerprint: impl Fn(&T) -> (&str, F),
 ) -> bool {
     local_items.iter().any(|item| {
-        let (item_id, item_updated_at) = id_and_updated_at(item);
-        item_id == id && item_updated_at == winning_updated_at
+        let (item_id, item_fingerprint) = id_and_fingerprint(item);
+        item_id == id && item_fingerprint == winning_fingerprint
     })
 }
 
@@ -503,6 +528,61 @@ mod tests {
 
         let fetched = task_repo::get(&conn, task.id).unwrap().unwrap();
         assert_eq!(fetched.title, "edited remotely, later");
+    }
+
+    #[test]
+    fn a_completion_wins_a_timestamp_tie_against_a_stale_open_copy() {
+        // The completed-tasks-resurrected bug: before completion stamped
+        // `updated_at`, one device could complete a task while another kept it
+        // open, both at the same `updated_at`. The merge must land on the
+        // completed version regardless of source order, in both directions.
+        let conn = db::open_in_memory().unwrap();
+        let local = local_snapshot(&conn, "device-a").unwrap();
+
+        let task = Task::new_inbox("Fix arrow key/tab navigation");
+        let mut open_copy = SyncTask::from(&task);
+        open_copy.completed = false;
+        let mut done_copy = SyncTask::from(&task);
+        done_copy.completed = true;
+        done_copy.completed_at = Some(task.updated_at); // same instant, no bump
+        assert_eq!(open_copy.updated_at, done_copy.updated_at);
+
+        for (first, second) in [
+            (open_copy.clone(), done_copy.clone()),
+            (done_copy.clone(), open_copy.clone()),
+        ] {
+            let conn = db::open_in_memory().unwrap();
+            let remotes = [remote_with(vec![first], vec![]), remote_with(vec![second], vec![])];
+            merge(&conn, &local, &remotes).unwrap();
+
+            let fetched = task_repo::get(&conn, task.id).unwrap().unwrap();
+            assert!(fetched.completed, "completion lost the tie");
+            assert!(task_repo::list_inbox(&conn).unwrap().is_empty());
+            assert_eq!(task_repo::list_completed(&conn).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_completion_heals_a_device_already_holding_the_stale_open_copy() {
+        // Even a device that already stored the open copy at the tied timestamp
+        // must adopt the completion — `already_current` has to notice they
+        // differ despite the equal `updated_at`.
+        let conn = db::open_in_memory().unwrap();
+        let mut task = Task::new_inbox("Add file selector to sync settings");
+        task_repo::create(&conn, &task).unwrap();
+        // Force local's updated_at to a known instant we can tie against.
+        task = task_repo::get(&conn, task.id).unwrap().unwrap();
+        let local = local_snapshot(&conn, "device-a").unwrap();
+        assert!(!local.tasks[0].completed);
+
+        let mut done_copy = local.tasks[0].clone();
+        done_copy.completed = true;
+        done_copy.completed_at = Some(task.updated_at); // equal updated_at
+        let remote = remote_with(vec![done_copy], vec![]);
+
+        let summary = merge(&conn, &local, std::slice::from_ref(&remote)).unwrap();
+        assert_eq!(summary.tasks_upserted, 1, "heal was skipped as already-current");
+        assert!(task_repo::get(&conn, task.id).unwrap().unwrap().completed);
     }
 
     #[test]
