@@ -40,6 +40,9 @@ impl eframe::App for WuWeiApp {
         self.state.poll_chat();
         self.state.poll_sync();
         self.state.maybe_auto_sync();
+        self.state.poll_calendar();
+        self.state.maybe_auto_sync_calendar();
+        self.state.poll_google_auth();
         self.state.poll_db_path_dialog();
         self.state.poll_sync_folder_dialog();
         // The native file dialogs run on a background thread (see

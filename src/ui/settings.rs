@@ -2,6 +2,7 @@ use eframe::egui;
 
 use crate::llm::ProviderKind;
 use crate::state::AppState;
+use crate::ui::theme;
 
 /// Fixed id so a future shortcut could focus this field directly (mirrors
 /// `quick_capture::field_id`/`new_project::field_id`).
@@ -99,6 +100,8 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
     let mut cancel_clicked = false;
     let mut browse_db_path_clicked = false;
     let mut browse_sync_folder_clicked = false;
+    let mut connect_gcal_clicked = false;
+    let mut disconnect_gcal_clicked = false;
 
     egui::Window::new("Settings")
         .collapsible(false)
@@ -199,6 +202,62 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
             }
 
             ui.separator();
+            ui.heading("Calendar");
+            ui.label(
+                "Shows today's events from a Google Calendar in the Today view. \
+                 Requires an OAuth client from your own Google Cloud project — \
+                 see the README for setup steps.",
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Client ID");
+                ui.add(egui::TextEdit::singleline(&mut draft.gcal_client_id).desired_width(260.0));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Client Secret");
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.gcal_client_secret)
+                        .password(!draft.show_gcal_client_secret)
+                        .desired_width(260.0),
+                );
+                if ui
+                    .selectable_label(draft.show_gcal_client_secret, "👁")
+                    .on_hover_text(if draft.show_gcal_client_secret {
+                        "Hide client secret"
+                    } else {
+                        "Show client secret"
+                    })
+                    .clicked()
+                {
+                    draft.show_gcal_client_secret = !draft.show_gcal_client_secret;
+                }
+            });
+            ui.horizontal(|ui| {
+                if draft.gcal_connected {
+                    ui.colored_label(theme::ACCENT, "\u{2713} Connected");
+                    if ui.button("Disconnect").clicked() {
+                        disconnect_gcal_clicked = true;
+                    }
+                } else {
+                    let ready = !draft.gcal_client_id.trim().is_empty()
+                        && !draft.gcal_client_secret.trim().is_empty();
+                    let connecting = state.google_auth_pending.is_some();
+                    if ui
+                        .add_enabled(
+                            ready && !connecting,
+                            egui::Button::new("Connect Google Calendar"),
+                        )
+                        .clicked()
+                    {
+                        connect_gcal_clicked = true;
+                    }
+                }
+            });
+            if let Some(status) = &state.google_auth_status {
+                ui.weak(status);
+            }
+
+            ui.separator();
             ui.heading("Keyboard Shortcuts");
             egui::ScrollArea::vertical()
                 .max_height(220.0)
@@ -241,6 +300,12 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
     if browse_sync_folder_clicked {
         state.browse_for_sync_folder();
     }
+    if connect_gcal_clicked {
+        state.start_google_oauth();
+    }
+    if disconnect_gcal_clicked {
+        state.disconnect_google_calendar();
+    }
 }
 
 #[cfg(test)]
@@ -259,6 +324,9 @@ mod tests {
                 ("llm_base_url", "https://example.com"),
                 ("llm_model", "claude-test"),
                 ("sync_folder_path", "/home/test/sync"),
+                ("gcal_client_id", "client-123"),
+                ("gcal_client_secret", "shh"),
+                ("gcal_refresh_token", "refresh-token"),
             ],
         )
         .unwrap();
@@ -270,6 +338,16 @@ mod tests {
         assert_eq!(draft.llm_model, "claude-test");
         assert_eq!(draft.sync_folder_path, "/home/test/sync");
         assert!(!draft.db_path.is_empty());
+        assert_eq!(draft.gcal_client_id, "client-123");
+        assert_eq!(draft.gcal_client_secret, "shh");
+        assert!(draft.gcal_connected);
+    }
+
+    #[test]
+    fn draft_shows_disconnected_when_no_refresh_token_is_saved() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.open_settings();
+        assert!(!state.settings.as_ref().unwrap().gcal_connected);
     }
 
     #[test]

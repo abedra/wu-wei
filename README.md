@@ -12,6 +12,7 @@ Wu Wei stores tasks and projects in a local SQLite database, offers AI-assisted 
 - **AI chat assistant** — a bottom panel where you can ask things like "roll all of my overdue tasks to today" and have it act directly on your tasks and projects.
 - **Recurring tasks** — completing a repeating task spawns its next occurrence automatically.
 - **Multi-device sync** — an optional, folder-based sync with last-write-wins merging and tombstone-based deletes; no server required.
+- **Google Calendar in Today** — optionally connect a Google Calendar to show today's events alongside today's tasks. See [Google Calendar](#google-calendar).
 - **Local-first** — a single SQLite file; everything works fully offline. AI features are entirely optional.
 
 ## Requirements
@@ -76,6 +77,7 @@ src/
   db/                  SQLite schema and repositories
   llm/                 OpenAI/Anthropic providers, prompt construction, chat actions
   sync/                folder-based multi-device sync (sync.rs)
+  calendar/            Google Calendar OAuth + read-only events fetch
   ui/                  egui views: sidebar, task list, detail panel, pickers, settings, chat
 ```
 
@@ -102,4 +104,15 @@ src/
 ## Sync
 
 Sync is folder-based, not a live connection: each device keeps its own local database, and a sync run writes the device's full current state to `<folder>/<device-id>.json`, reads every other device's file, and merges the result locally. Conflicts resolve by latest `updated_at`, except deletions always win regardless of timestamp. Set a shared folder path in Settings to enable it; the app auto-syncs periodically and on launch.
+
+## Google Calendar
+
+The Today view can show today's events from a Google Calendar (read-only, primary calendar only). Since this talks to Google's API on your behalf, it needs an OAuth client from your own Google Cloud project:
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/), create a project (or use an existing one) and enable the **Google Calendar API**.
+2. Configure the OAuth consent screen (External is fine for personal use; you don't need to submit it for verification to use it yourself).
+3. Create an OAuth client ID of type **Desktop app**. Desktop app clients accept a loopback redirect (`http://127.0.0.1:<any port>/`) without registering an exact port, which is what Wu Wei uses to receive the sign-in response.
+4. In Wu Wei's Settings (`Cmd+,`) → Calendar, paste the client ID and client secret, then click **Connect Google Calendar**. Your browser opens Google's consent screen; approving it hands control back to the app automatically.
+
+Once connected, Today's events appear above the task list whenever you're on the Today perspective, refreshing automatically every few minutes. Disconnecting from Settings revokes nothing on Google's side — it just clears Wu Wei's saved tokens.
 

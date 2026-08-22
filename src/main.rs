@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod calendar;
 mod db;
 mod db_bootstrap;
 mod desktop_install;

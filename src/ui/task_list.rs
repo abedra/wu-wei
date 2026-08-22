@@ -7,7 +7,53 @@ use crate::domain::task::TaskId;
 use crate::state::{AppState, Perspective, Selection};
 use crate::ui::theme;
 
+/// Read-only "Today's Events" block sourced from a connected Google
+/// Calendar (see `AppState::google_calendar_config`/`run_calendar_sync`) —
+/// deliberately a separate section rather than interleaved into the task
+/// table below, since events aren't tasks (no checkbox, no due date, no
+/// project). Shown only on the Today perspective, and only once the
+/// calendar's actually connected.
+fn draw_calendar_events(ui: &mut egui::Ui, state: &AppState) {
+    if state.perspective != Perspective::Today || state.google_calendar_config.is_none() {
+        return;
+    }
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            ui.strong("Today's Events");
+            if state.calendar_busy {
+                ui.weak("(syncing…)");
+            }
+        });
+        if let Some(status) = &state.calendar_status {
+            ui.colored_label(theme::OVERDUE, status);
+        } else if state.calendar_events.is_empty() {
+            ui.weak("No events today.");
+        }
+        for event in &state.calendar_events {
+            ui.horizontal(|ui| {
+                let time_label = if event.all_day {
+                    "All day".to_string()
+                } else {
+                    event
+                        .start
+                        .with_timezone(&Local)
+                        .format("%-I:%M %p")
+                        .to_string()
+                };
+                ui.monospace(time_label);
+                ui.label(&event.title);
+                if let Some(location) = &event.location {
+                    ui.weak(location);
+                }
+            });
+        }
+    });
+    ui.add_space(8.0);
+}
+
 pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
+    draw_calendar_events(ui, state);
+
     if state.perspective == Perspective::Completed && !state.visible_tasks.is_empty() {
         ui.horizontal(|ui| {
             if ui.button("Archive Completed").clicked() {

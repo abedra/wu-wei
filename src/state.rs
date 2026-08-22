@@ -4,6 +4,7 @@ use chrono::{Datelike, Duration, Local, NaiveDate, Utc, Weekday};
 use rusqlite::Connection;
 use uuid::Uuid;
 
+use crate::calendar::{self, CalendarEvent, GoogleCalendarConfig, GoogleTokenSet};
 use crate::db;
 use crate::db::error::DbResult;
 use crate::db::{project_repo, settings_repo, task_repo};
@@ -144,6 +145,16 @@ pub struct SettingsDraft {
     pub llm_model: String,
     pub db_path: String,
     pub sync_folder_path: String,
+    pub gcal_client_id: String,
+    pub gcal_client_secret: String,
+    /// Same transient, not-persisted purpose as `show_api_key`, for the
+    /// client secret field.
+    pub show_gcal_client_secret: bool,
+    /// Whether `settings` already has a Google refresh token saved —
+    /// display-only (drives "Connect" vs "✓ Connected" in `ui::settings`),
+    /// never itself written back on Save; only `AppState::poll_google_auth`/
+    /// `disconnect_google_calendar` ever touch the actual token settings.
+    pub gcal_connected: bool,
 }
 
 /// `Connection::path` returns `None` for an in-memory or otherwise
@@ -169,7 +180,10 @@ fn current_db_path(conn: &Connection) -> String {
 /// problem.
 fn dedup_keep_order(items: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
-    items.into_iter().filter(|item| seen.insert(item.clone())).collect()
+    items
+        .into_iter()
+        .filter(|item| seen.insert(item.clone()))
+        .collect()
 }
 
 impl SettingsDraft {
@@ -218,6 +232,10 @@ impl SettingsDraft {
                 .get("sync_folder_path")
                 .cloned()
                 .unwrap_or_default(),
+            gcal_client_id: field("gcal_client_id", None),
+            gcal_client_secret: field("gcal_client_secret", None),
+            show_gcal_client_secret: false,
+            gcal_connected: non_blank("gcal_refresh_token").is_some(),
         }
     }
 }
@@ -364,6 +382,34 @@ pub struct AppState {
     pub db_path_dialog: Option<Receiver<Option<String>>>,
     /// Same shape as `db_path_dialog`, for Settings' sync folder field.
     pub sync_folder_dialog: Option<Receiver<Option<String>>>,
+    /// `None` when Google Calendar hasn't been connected (see
+    /// `GoogleCalendarConfig::resolve`) — the "Today's Events" section is
+    /// simply not shown, not an error, until the user connects it in
+    /// Settings.
+    pub google_calendar_config: Option<GoogleCalendarConfig>,
+    /// Today's events from the connected calendar, refreshed by
+    /// `run_calendar_sync`/`poll_calendar`. Never persisted — re-fetched on
+    /// every sync, same "external source of truth, local cache only"
+    /// relationship `visible_tasks` has with the database.
+    pub calendar_events: Vec<CalendarEvent>,
+    /// Set while a background calendar fetch is in flight; polled once per
+    /// frame in `poll_calendar`. Same shape as `sync_pending`/`sync_busy`.
+    pub calendar_pending: Option<Receiver<Result<Vec<CalendarEvent>, String>>>,
+    pub calendar_busy: bool,
+    /// The last calendar fetch's error, if any — shown inline in the
+    /// "Today's Events" section (see `ui::task_list`). Mirrors `sync_status`:
+    /// a dedicated slot rather than the generic `error_message` banner, so a
+    /// standing auth problem doesn't re-post to the banner every auto-sync.
+    pub calendar_status: Option<String>,
+    /// When `maybe_auto_sync_calendar` last actually ran one — `None` means
+    /// it hasn't yet, mirrors `last_auto_sync`.
+    pub last_calendar_sync: Option<chrono::DateTime<Utc>>,
+    /// Set while the Google OAuth loopback flow (browser + local redirect
+    /// listener) is in flight; polled once per frame in `poll_google_auth`.
+    pub google_auth_pending: Option<Receiver<Result<GoogleTokenSet, String>>>,
+    /// Status/progress text for the OAuth flow, shown under the
+    /// Connect/Disconnect button in `ui::settings`.
+    pub google_auth_status: Option<String>,
 }
 
 impl AppState {
@@ -407,6 +453,14 @@ impl AppState {
             last_auto_sync: None,
             db_path_dialog: None,
             sync_folder_dialog: None,
+            google_calendar_config: GoogleCalendarConfig::resolve(&llm_settings),
+            calendar_events: Vec::new(),
+            calendar_pending: None,
+            calendar_busy: false,
+            calendar_status: None,
+            last_calendar_sync: None,
+            google_auth_pending: None,
+            google_auth_status: None,
         };
         state.refresh_projects();
         state.refresh_visible_tasks();
@@ -419,6 +473,12 @@ impl AppState {
         self.highlighted_task = None;
         self.sidebar_focused = false;
         self.refresh_visible_tasks();
+        if p == Perspective::Today {
+            // Fires immediately on first visit (`last_calendar_sync` is
+            // still `None`) rather than waiting out the auto-sync interval —
+            // see `maybe_auto_sync_calendar`.
+            self.maybe_auto_sync_calendar();
+        }
     }
 
     /// Clears whatever is selected and its edit buffer, closing the detail
@@ -623,6 +683,174 @@ impl AppState {
         }
         self.last_auto_sync = Some(Utc::now());
         self.run_sync();
+    }
+
+    /// Kicks off a calendar fetch on a background thread (see
+    /// `calendar::run_async`) — a no-op if Google Calendar isn't connected,
+    /// one's already in flight, or this database has no file path (an
+    /// in-memory database, which only tests use). Mirrors `run_sync`.
+    pub fn run_calendar_sync(&mut self) {
+        if self.calendar_busy {
+            return;
+        }
+        let Some(config) = self.google_calendar_config.clone() else {
+            return;
+        };
+        let Some(db_path) = self.conn.path().filter(|p| !p.is_empty()) else {
+            return;
+        };
+        let today = Local::now().date_naive();
+        self.calendar_pending = Some(calendar::run_async(db_path.to_string(), config, today));
+        self.calendar_busy = true;
+    }
+
+    /// Polled once per frame from `app.rs`, mirrors `poll_sync`.
+    pub fn poll_calendar(&mut self) {
+        let Some(rx) = &self.calendar_pending else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(events)) => {
+                self.calendar_pending = None;
+                self.calendar_busy = false;
+                self.calendar_events = events;
+                self.calendar_status = None;
+                self.last_calendar_sync = Some(Utc::now());
+            }
+            Ok(Err(e)) => {
+                self.calendar_pending = None;
+                self.calendar_busy = false;
+                self.calendar_status = Some(format!("Calendar sync failed: {e}"));
+                self.last_calendar_sync = Some(Utc::now());
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.calendar_pending = None;
+                self.calendar_busy = false;
+            }
+        }
+    }
+
+    /// Called once per frame from `app.rs`, mirrors `maybe_auto_sync` — but
+    /// additionally gated on the Today perspective actually being shown, so
+    /// an idle app sitting on some other view doesn't keep spending API
+    /// quota fetching events nobody's looking at. Also called directly from
+    /// `set_perspective` on switching to Today, so the first visit doesn't
+    /// wait out the interval.
+    pub fn maybe_auto_sync_calendar(&mut self) {
+        const AUTO_SYNC_INTERVAL: Duration = Duration::minutes(5);
+        if self.perspective != Perspective::Today || self.calendar_busy {
+            return;
+        }
+        let due = match self.last_calendar_sync {
+            None => true,
+            Some(last) => Utc::now() - last >= AUTO_SYNC_INTERVAL,
+        };
+        if !due {
+            return;
+        }
+        self.run_calendar_sync();
+    }
+
+    /// Starts the Google OAuth loopback flow (see `calendar::oauth`) using
+    /// whatever client id/secret are currently typed into the open Settings
+    /// draft. Persists them to `settings` immediately — not waiting for the
+    /// screen's own Save button — so a background token refresh started
+    /// later can find them even if the user closes Settings without hitting
+    /// Save. A no-op if a connect attempt is already in flight or either
+    /// field is blank.
+    pub fn start_google_oauth(&mut self) {
+        if self.google_auth_pending.is_some() {
+            return;
+        }
+        let Some(draft) = &self.settings else {
+            return;
+        };
+        let client_id = draft.gcal_client_id.trim().to_string();
+        let client_secret = draft.gcal_client_secret.trim().to_string();
+        if client_id.is_empty() || client_secret.is_empty() {
+            self.google_auth_status = Some("Enter a client ID and client secret first".to_string());
+            return;
+        }
+        if let Err(e) = settings_repo::set_many(
+            &self.conn,
+            &[
+                ("gcal_client_id", client_id.as_str()),
+                ("gcal_client_secret", client_secret.as_str()),
+            ],
+        ) {
+            self.error_message = Some(e.to_string());
+            return;
+        }
+        self.google_auth_status =
+            Some("Waiting for you to sign in with Google in your browser...".to_string());
+        self.google_auth_pending = Some(calendar::connect_async(client_id, client_secret));
+    }
+
+    /// Polled once per frame from `app.rs`. On success, persists the new
+    /// tokens, re-resolves `google_calendar_config` so the feature is live
+    /// immediately, and kicks off an immediate fetch so Today's events show
+    /// up without waiting for the next auto-sync tick.
+    pub fn poll_google_auth(&mut self) {
+        let Some(rx) = &self.google_auth_pending else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(tokens)) => {
+                self.google_auth_pending = None;
+                let expiry = tokens.expiry.to_rfc3339();
+                let pairs = [
+                    ("gcal_access_token", tokens.access_token.as_str()),
+                    ("gcal_refresh_token", tokens.refresh_token.as_str()),
+                    ("gcal_token_expiry", expiry.as_str()),
+                ];
+                if let Err(e) = settings_repo::set_many(&self.conn, &pairs) {
+                    self.error_message = Some(e.to_string());
+                    return;
+                }
+                self.google_auth_status = Some("Connected".to_string());
+                if let Some(draft) = &mut self.settings {
+                    draft.gcal_connected = true;
+                }
+                let settings = settings_repo::get_all(&self.conn).unwrap_or_default();
+                self.google_calendar_config = GoogleCalendarConfig::resolve(&settings);
+                self.run_calendar_sync();
+            }
+            Ok(Err(e)) => {
+                self.google_auth_pending = None;
+                self.google_auth_status = Some(format!("Connection failed: {e}"));
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.google_auth_pending = None;
+            }
+        }
+    }
+
+    /// Clears the saved Google tokens (keeping the client id/secret, so
+    /// reconnecting is one click) and stops showing events. Blanking rather
+    /// than deleting the settings rows matches the existing "blank counts as
+    /// absent" convention (see `GoogleCalendarConfig::resolve`) — there's no
+    /// `settings_repo::delete` to reach for instead.
+    pub fn disconnect_google_calendar(&mut self) {
+        if let Err(e) = settings_repo::set_many(
+            &self.conn,
+            &[
+                ("gcal_access_token", ""),
+                ("gcal_refresh_token", ""),
+                ("gcal_token_expiry", ""),
+            ],
+        ) {
+            self.error_message = Some(e.to_string());
+            return;
+        }
+        self.google_calendar_config = None;
+        self.calendar_events.clear();
+        self.calendar_status = None;
+        self.google_auth_status = None;
+        if let Some(draft) = &mut self.settings {
+            draft.gcal_connected = false;
+        }
     }
 
     pub fn refresh_projects(&mut self) {
@@ -864,7 +1092,10 @@ impl AppState {
                     if let ChatAction::CreateProject { name } = &action {
                         projects_created_this_reply.push(name.clone());
                     }
-                    pending.push(PendingChatAction { action, description });
+                    pending.push(PendingChatAction {
+                        action,
+                        description,
+                    });
                 }
                 Err(e) => failures.push(e),
             }
@@ -981,7 +1212,9 @@ impl AppState {
         projects_created_this_reply: &[String],
     ) -> Result<String, String> {
         let project_exists = |name: &str| {
-            self.projects.iter().any(|p| p.name.eq_ignore_ascii_case(name))
+            self.projects
+                .iter()
+                .any(|p| p.name.eq_ignore_ascii_case(name))
                 || projects_created_this_reply
                     .iter()
                     .any(|p| p.eq_ignore_ascii_case(name))
@@ -1039,10 +1272,8 @@ impl AppState {
                 // project name doesn't fail the action, it just files to
                 // the Inbox, so the preview should describe the same
                 // outcome rather than naming a project that won't be used.
-                if let Some(project_name) = task
-                    .project
-                    .as_ref()
-                    .filter(|name| project_exists(name))
+                if let Some(project_name) =
+                    task.project.as_ref().filter(|name| project_exists(name))
                 {
                     description.push_str(&format!(" in {project_name}"));
                 }
@@ -1511,6 +1742,8 @@ impl AppState {
             ("llm_base_url", draft.llm_base_url.trim()),
             ("llm_model", draft.llm_model.trim()),
             ("sync_folder_path", draft.sync_folder_path.trim()),
+            ("gcal_client_id", draft.gcal_client_id.trim()),
+            ("gcal_client_secret", draft.gcal_client_secret.trim()),
         ];
         if let Err(e) = settings_repo::set_many(&self.conn, &pairs) {
             self.error_message = Some(e.to_string());
@@ -2371,8 +2604,8 @@ mod tests {
         // id the same way across several actions in one batch, producing
         // the identical "unparsable task_id" error five times over.
         let mut state = AppState::new(crate::db::open_in_memory().unwrap());
-        let same_failure = "model returned an unparsable task_id \"bad\": invalid length"
-            .to_string();
+        let same_failure =
+            "model returned an unparsable task_id \"bad\": invalid length".to_string();
 
         state.receive_chat_reply(ChatReply {
             reply: "Done.".to_string(),
