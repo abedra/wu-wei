@@ -99,6 +99,7 @@ pub fn enso_png(size: u32, color: egui::Color32) -> Vec<u8> {
 /// inside an installed `.app` bundle (see `install-desktop` on macOS). Bundles
 /// several PNG-encoded sizes (modern ICNS entries carry PNG data directly) so
 /// the Dock, Finder and app switcher each have a crisp source to scale from.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn enso_icns(color: egui::Color32) -> Vec<u8> {
     // (OSType, pixel size) pairs, largest last. The `ic0*` types all accept a
     // raw PNG payload, so no legacy ARGB packing is needed.
@@ -129,6 +130,7 @@ pub fn enso_icns(color: egui::Color32) -> Vec<u8> {
 /// icon a Start Menu shortcut points at (see `install-desktop` on Windows).
 /// Modern `.ico` entries may carry PNG data directly (supported since Vista),
 /// so this reuses [`enso_png`] instead of hand-rolling BMP/DIB encoding.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn enso_ico(color: egui::Color32) -> Vec<u8> {
     const SIZES: &[u32] = &[16, 32, 48, 256];
 
