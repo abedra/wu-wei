@@ -59,6 +59,30 @@ const SHORTCUT_GROUPS: &[(&str, &[(&str, &str)])] = &[
     ("Any popup", &[("Enter", "Confirm"), ("Esc", "Cancel")]),
 ];
 
+/// A file dialog seeded to open next to whatever `path` currently holds —
+/// its parent directory if `path` names a file (possibly one that doesn't
+/// exist yet), itself if it's already a directory, or the platform default
+/// (e.g. home) if it's blank or doesn't resolve to anything on disk. Public
+/// to `state`, which runs the actual (blocking) dialog call on a background
+/// thread — see `AppState::browse_for_db_path`.
+pub(crate) fn file_dialog_near(path: &str) -> rfd::FileDialog {
+    let dialog = rfd::FileDialog::new();
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return dialog;
+    }
+    let p = std::path::Path::new(trimmed);
+    let dir = if p.is_dir() {
+        Some(p)
+    } else {
+        p.parent().filter(|d| d.is_dir())
+    };
+    match dir {
+        Some(dir) => dialog.set_directory(dir),
+        None => dialog,
+    }
+}
+
 /// Draws the Settings screen when open (toggled by Cmd+, — see
 /// `ui::shortcuts`). Same floating-window shape as the other popups, but
 /// commits via an explicit Save rather than live-as-you-type: applying a
@@ -70,6 +94,8 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
 
     let mut save_clicked = false;
     let mut cancel_clicked = false;
+    let mut browse_db_path_clicked = false;
+    let mut browse_sync_folder_clicked = false;
 
     egui::Window::new("Settings")
         .collapsible(false)
@@ -133,7 +159,14 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
             ui.heading("Database");
             ui.horizontal(|ui| {
                 ui.label("File path");
-                ui.add(egui::TextEdit::singleline(&mut draft.db_path).desired_width(300.0));
+                ui.add(egui::TextEdit::singleline(&mut draft.db_path).desired_width(240.0));
+                let browsing = state.db_path_dialog.is_some();
+                if ui
+                    .add_enabled(!browsing, egui::Button::new("Browse…"))
+                    .clicked()
+                {
+                    browse_db_path_clicked = true;
+                }
             });
             ui.weak("Changing this reconnects immediately on Save.");
 
@@ -148,8 +181,15 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
             ui.horizontal(|ui| {
                 ui.label("Folder");
                 ui.add(
-                    egui::TextEdit::singleline(&mut draft.sync_folder_path).desired_width(300.0),
+                    egui::TextEdit::singleline(&mut draft.sync_folder_path).desired_width(240.0),
                 );
+                let browsing = state.sync_folder_dialog.is_some();
+                if ui
+                    .add_enabled(!browsing, egui::Button::new("Browse…"))
+                    .clicked()
+                {
+                    browse_sync_folder_clicked = true;
+                }
             });
             if let Some(status) = &state.sync_status {
                 ui.weak(format!("Last sync: {status}"));
@@ -191,5 +231,54 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
         state.save_settings();
     } else if cancel_clicked {
         state.close_settings();
+    }
+    if browse_db_path_clicked {
+        state.browse_for_db_path();
+    }
+    if browse_sync_folder_clicked {
+        state.browse_for_sync_folder();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+
+    #[test]
+    fn draft_is_seeded_with_existing_settings_values() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        crate::db::settings_repo::set_many(
+            &state.conn,
+            &[
+                ("llm_provider", "anthropic"),
+                ("llm_api_key", "sk-test-123"),
+                ("llm_base_url", "https://example.com"),
+                ("llm_model", "claude-test"),
+                ("sync_folder_path", "/home/test/sync"),
+            ],
+        )
+        .unwrap();
+
+        state.open_settings();
+        let draft = state.settings.as_ref().unwrap();
+        assert_eq!(draft.llm_api_key, "sk-test-123");
+        assert_eq!(draft.llm_base_url, "https://example.com");
+        assert_eq!(draft.llm_model, "claude-test");
+        assert_eq!(draft.sync_folder_path, "/home/test/sync");
+        assert!(!draft.db_path.is_empty());
+    }
+
+    #[test]
+    fn draws_without_panicking_when_open() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.open_settings();
+        assert!(state.settings.is_some());
+
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |ctx| {
+            draw(ctx, &mut state);
+        });
+        output.textures_delta.clear();
     }
 }

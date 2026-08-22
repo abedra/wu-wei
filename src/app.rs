@@ -40,6 +40,17 @@ impl eframe::App for WuWeiApp {
         self.state.poll_chat();
         self.state.poll_sync();
         self.state.maybe_auto_sync();
+        self.state.poll_db_path_dialog();
+        self.state.poll_sync_folder_dialog();
+        // The native file dialogs run on a background thread (see
+        // `AppState::browse_for_db_path`) so they don't freeze the window
+        // while open, but that means nothing else prompts a repaint when one
+        // resolves — without this, the picked path wouldn't show up in
+        // Settings until some unrelated input (e.g. a mouse move) happened
+        // to trigger the next frame.
+        if self.state.db_path_dialog.is_some() || self.state.sync_folder_dialog.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
         ui::shortcuts::handle(&ctx, &mut self.state);
         ui::project_picker::draw(&ctx, &mut self.state);
         ui::due_date_picker::draw(&ctx, &mut self.state);

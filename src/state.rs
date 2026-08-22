@@ -164,29 +164,35 @@ fn current_db_path(conn: &Connection) -> String {
 
 impl SettingsDraft {
     /// Seeds the draft from whatever's actually in effect right now: a
-    /// value already saved to `settings` wins, otherwise it falls back to
-    /// the live `LlmConfig` (itself env-derived when nothing's been saved
-    /// yet) so the screen shows what's really active rather than starting
-    /// blank.
+    /// non-blank value already saved to `settings` wins, otherwise it falls
+    /// back to the live `LlmConfig` (itself env-derived when nothing's been
+    /// saved yet) so the screen shows what's really active rather than
+    /// starting blank. A *blank* saved value is treated the same as no
+    /// saved value at all — otherwise a Settings screen opened once with an
+    /// empty field (e.g. before the live config had loaded) would persist
+    /// that blank on Save and permanently shadow the env-derived value on
+    /// every future load, even though nothing was ever deliberately cleared.
     fn load(conn: &Connection, current: Option<&LlmConfig>) -> Self {
         let settings = settings_repo::get_all(conn).unwrap_or_default();
+        let non_blank = |key: &str| {
+            settings
+                .get(key)
+                .map(String::as_str)
+                .filter(|s| !s.trim().is_empty())
+        };
 
-        let provider_str = settings
-            .get("llm_provider")
-            .map(String::as_str)
-            .or(current.map(|c| match c.provider {
-                ProviderKind::OpenAi => "openai",
-                ProviderKind::Anthropic => "anthropic",
-            }));
+        let provider_str = non_blank("llm_provider").or(current.map(|c| match c.provider {
+            ProviderKind::OpenAi => "openai",
+            ProviderKind::Anthropic => "anthropic",
+        }));
         let llm_provider = match provider_str {
             Some("anthropic") => ProviderKind::Anthropic,
             _ => ProviderKind::OpenAi,
         };
 
         let field = |key: &str, fallback: Option<&String>| -> String {
-            settings
-                .get(key)
-                .cloned()
+            non_blank(key)
+                .map(str::to_string)
                 .or_else(|| fallback.cloned())
                 .unwrap_or_default()
         };
@@ -314,6 +320,15 @@ pub struct AppState {
     /// hasn't yet, which is also what makes it fire on the very first
     /// frame (covers "sync on launch").
     pub last_auto_sync: Option<chrono::DateTime<Utc>>,
+    /// Set while the native "Browse…" dialog for Settings' database file
+    /// path is open — see `browse_for_db_path`/`poll_db_path_dialog`. `rfd`'s
+    /// dialogs block the calling thread, so (like `llm_pending`/`sync_pending`)
+    /// this runs on a background thread rather than blocking the UI: doing it
+    /// on the UI thread would freeze the whole app's rendering for as long as
+    /// the dialog stayed open.
+    pub db_path_dialog: Option<Receiver<Option<String>>>,
+    /// Same shape as `db_path_dialog`, for Settings' sync folder field.
+    pub sync_folder_dialog: Option<Receiver<Option<String>>>,
 }
 
 impl AppState {
@@ -352,6 +367,8 @@ impl AppState {
             sync_busy: false,
             sync_status: None,
             last_auto_sync: None,
+            db_path_dialog: None,
+            sync_folder_dialog: None,
         };
         state.refresh_projects();
         state.refresh_visible_tasks();
@@ -1153,6 +1170,90 @@ impl AppState {
     /// it) is simply dropped.
     pub fn close_settings(&mut self) {
         self.settings = None;
+    }
+
+    /// Opens the native "Browse…" dialog for the database file path, on a
+    /// background thread (see `db_path_dialog`'s doc comment for why). A
+    /// no-op if one's already open. `save_file`, not `pick_file`: the path
+    /// may name a database that doesn't exist yet — Settings lets you point
+    /// at a brand new file, not just choose among existing ones.
+    pub fn browse_for_db_path(&mut self) {
+        if self.db_path_dialog.is_some() {
+            return;
+        }
+        let starting = self
+            .settings
+            .as_ref()
+            .map(|d| d.db_path.clone())
+            .unwrap_or_default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let picked = crate::ui::settings::file_dialog_near(&starting)
+                .add_filter("SQLite Database", &["db", "sqlite", "sqlite3"])
+                .set_file_name("wu_wei.db")
+                .save_file()
+                .map(|p| p.display().to_string());
+            let _ = tx.send(picked);
+        });
+        self.db_path_dialog = Some(rx);
+    }
+
+    /// Same shape as `browse_for_db_path`, for the sync folder field.
+    pub fn browse_for_sync_folder(&mut self) {
+        if self.sync_folder_dialog.is_some() {
+            return;
+        }
+        let starting = self
+            .settings
+            .as_ref()
+            .map(|d| d.sync_folder_path.clone())
+            .unwrap_or_default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let picked = crate::ui::settings::file_dialog_near(&starting)
+                .pick_folder()
+                .map(|p| p.display().to_string());
+            let _ = tx.send(picked);
+        });
+        self.sync_folder_dialog = Some(rx);
+    }
+
+    /// Polled once per frame from `app.rs`. Non-blocking: does nothing while
+    /// the dialog is still open. A cancelled dialog (`Ok(None)`) just clears
+    /// the pending state, leaving whatever was already typed untouched.
+    pub fn poll_db_path_dialog(&mut self) {
+        let Some(rx) = &self.db_path_dialog else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Some(path)) => {
+                self.db_path_dialog = None;
+                if let Some(draft) = &mut self.settings {
+                    draft.db_path = path;
+                }
+            }
+            Ok(None) => self.db_path_dialog = None,
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => self.db_path_dialog = None,
+        }
+    }
+
+    /// Same shape as `poll_db_path_dialog`, for the sync folder field.
+    pub fn poll_sync_folder_dialog(&mut self) {
+        let Some(rx) = &self.sync_folder_dialog else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Some(path)) => {
+                self.sync_folder_dialog = None;
+                if let Some(draft) = &mut self.settings {
+                    draft.sync_folder_path = path;
+                }
+            }
+            Ok(None) => self.sync_folder_dialog = None,
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => self.sync_folder_dialog = None,
+        }
     }
 
     /// Commits the Settings draft: persists the LLM fields to `settings`
@@ -2583,6 +2684,38 @@ mod tests {
             saved.get("llm_api_key").map(String::as_str),
             Some("sk-live")
         );
+    }
+
+    #[test]
+    fn blank_saved_llm_fields_dont_shadow_the_live_env_derived_config() {
+        // Regression test: a blank value already sitting in `settings` (e.g.
+        // Settings was once saved before the env-derived config had loaded)
+        // must not permanently mask a real, working `.env`-sourced value —
+        // it should be treated the same as no saved value at all.
+        let conn = crate::db::open_in_memory().unwrap();
+        settings_repo::set_many(
+            &conn,
+            &[
+                ("llm_provider", ""),
+                ("llm_api_key", ""),
+                ("llm_base_url", ""),
+                ("llm_model", ""),
+            ],
+        )
+        .unwrap();
+
+        let live_config = LlmConfig {
+            provider: ProviderKind::Anthropic,
+            api_key: "sk-from-env".to_string(),
+            base_url: "https://api.anthropic.com".to_string(),
+            model: "claude-from-env".to_string(),
+        };
+
+        let draft = SettingsDraft::load(&conn, Some(&live_config));
+        assert_eq!(draft.llm_provider, ProviderKind::Anthropic);
+        assert_eq!(draft.llm_api_key, "sk-from-env");
+        assert_eq!(draft.llm_base_url, "https://api.anthropic.com");
+        assert_eq!(draft.llm_model, "claude-from-env");
     }
 
     #[test]
