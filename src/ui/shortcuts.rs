@@ -121,11 +121,12 @@ fn handle_focus_sidebar(ctx: &egui::Context, state: &mut AppState) {
 }
 
 fn handle_perspective_switches(ctx: &egui::Context, state: &mut AppState) {
-    const PERSPECTIVE_KEYS: [(egui::Key, Perspective); 4] = [
+    const PERSPECTIVE_KEYS: [(egui::Key, Perspective); 5] = [
         (egui::Key::Num1, Perspective::Inbox),
         (egui::Key::Num2, Perspective::Today),
         (egui::Key::Num3, Perspective::Completed),
         (egui::Key::Num4, Perspective::Overdue),
+        (egui::Key::Num5, Perspective::Review),
     ];
     for (key, perspective) in PERSPECTIVE_KEYS {
         let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, key);

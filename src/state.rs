@@ -21,6 +21,10 @@ pub enum Perspective {
     Inbox,
     Today,
     Overdue,
+    /// Every open task across every project (and the Inbox) — a weekly-review
+    /// perspective for scanning everything at once and deciding what needs a
+    /// new due date, independent of which project it happens to live in.
+    Review,
     Completed,
     Project(ProjectId),
 }
@@ -385,6 +389,7 @@ impl AppState {
             Perspective::Inbox,
             Perspective::Today,
             Perspective::Overdue,
+            Perspective::Review,
             Perspective::Completed,
         ];
         entries.extend(self.projects.iter().map(|p| Perspective::Project(p.id)));
@@ -439,6 +444,7 @@ impl AppState {
             Perspective::Inbox => task_repo::list_inbox(&self.conn),
             Perspective::Today => task_repo::list_today(&self.conn, today),
             Perspective::Overdue => task_repo::list_overdue(&self.conn, today),
+            Perspective::Review => task_repo::list_open(&self.conn),
             Perspective::Completed => task_repo::list_completed(&self.conn),
             Perspective::Project(id) => task_repo::list_by_project(&self.conn, id),
         };
@@ -1508,6 +1514,33 @@ mod tests {
     }
 
     #[test]
+    fn review_perspective_shows_every_open_task_across_projects_and_inbox_but_not_completed() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.new_project_name = "Kitchen Remodel".to_string();
+        state.create_project();
+        let project_id = state.projects[0].id;
+
+        state.quick_entry_buffer = "inbox item".to_string();
+        state.quick_capture_submit();
+
+        state.set_perspective(Perspective::Project(project_id));
+        state.quick_entry_buffer = "project item".to_string();
+        state.quick_capture_submit();
+        let project_item_id = state.visible_tasks[0].id;
+
+        state.quick_entry_buffer = "finished project item".to_string();
+        state.quick_capture_submit();
+        let done_id = state.visible_tasks[1].id;
+        state.toggle_complete(done_id, true);
+
+        state.set_perspective(Perspective::Review);
+        let ids: Vec<_> = state.visible_tasks.iter().map(|t| t.id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&project_item_id));
+        assert!(!ids.contains(&done_id));
+    }
+
+    #[test]
     fn quick_capture_popup_opens_submits_and_closes() {
         let mut state = AppState::new(crate::db::open_in_memory().unwrap());
         assert!(!state.quick_capture_open);
@@ -2300,6 +2333,7 @@ mod tests {
                 Perspective::Inbox,
                 Perspective::Today,
                 Perspective::Overdue,
+                Perspective::Review,
                 Perspective::Completed,
                 Perspective::Project(project_id),
             ]
@@ -2361,6 +2395,10 @@ mod tests {
 
         state.move_sidebar_highlight(1); // Overdue (empty)
         assert!(state.highlighted_task.is_none());
+
+        state.move_sidebar_highlight(1); // Review (only the still-open task)
+        assert_eq!(state.perspective, Perspective::Review);
+        assert_eq!(state.highlighted_task, Some(inbox_task));
 
         state.move_sidebar_highlight(1); // Completed
         assert_eq!(state.perspective, Perspective::Completed);
