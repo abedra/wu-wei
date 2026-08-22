@@ -33,12 +33,37 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     let mut to_select: Option<TaskId> = None;
     let today = Local::now().date_naive();
 
+    // `Column::auto()` only converges to the right width after a couple of
+    // frames (it sizes off of last frame's measured content), and this app
+    // only repaints on input, so a narrower project name after switching
+    // perspectives could stay stuck at the previous, wider size until some
+    // unrelated repaint happened to nudge it. Measuring the text ourselves
+    // and handing the table an exact width keeps it correct in the same
+    // frame the content changes, and still shrinks/grows with the longest
+    // visible project name.
+    let project_col_min = 80.0_f32;
+    let project_col_max = (ui.available_width() * 0.4).max(project_col_min);
+    let font_id = egui::TextStyle::Body.resolve(ui.style());
+    let project_text_width = state
+        .visible_tasks
+        .iter()
+        .map(|t| project_name(t.project_id, state))
+        .chain(std::iter::once("Project".to_string()))
+        .map(|text| {
+            ui.painter()
+                .layout_no_wrap(text, font_id.clone(), egui::Color32::WHITE)
+                .size()
+                .x
+        })
+        .fold(0.0_f32, f32::max);
+    let project_col_width = (project_text_width + 12.0).clamp(project_col_min, project_col_max);
+
     TableBuilder::new(ui)
         .striped(true)
         .column(Column::auto()) // complete
         .column(Column::remainder()) // title
         .column(Column::auto().at_least(90.0)) // due date
-        .column(Column::auto().at_least(80.0)) // project
+        .column(Column::initial(project_col_width)) // project
         .header(24.0, |mut header| {
             header.col(|ui| {
                 ui.strong("");
