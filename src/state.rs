@@ -162,6 +162,16 @@ fn current_db_path(conn: &Connection) -> String {
         .to_string()
 }
 
+/// Drops repeated entries, keeping the first occurrence's position — used
+/// for the chat panel's failure list, since a batch action gone wrong (e.g.
+/// the model mangling the same task id across several actions) otherwise
+/// repeats the identical error once per action instead of once per distinct
+/// problem.
+fn dedup_keep_order(items: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    items.into_iter().filter(|item| seen.insert(item.clone())).collect()
+}
+
 impl SettingsDraft {
     /// Seeds the draft from whatever's actually in effect right now: a
     /// non-blank value already saved to `settings` wins, otherwise it falls
@@ -859,6 +869,7 @@ impl AppState {
                 Err(e) => failures.push(e),
             }
         }
+        let failures = dedup_keep_order(failures);
         let mut content = reply.reply;
         if !pending.is_empty() {
             content.push_str("\n\nThis would: ");
@@ -909,6 +920,7 @@ impl AppState {
                 Err(e) => failures.push(e),
             }
         }
+        let failures = dedup_keep_order(failures);
         let mut content = String::new();
         if !done.is_empty() {
             content.push_str("Actions taken: ");
@@ -1797,6 +1809,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dedup_keep_order_drops_repeats_but_keeps_first_position() {
+        let deduped = dedup_keep_order(
+            ["a", "b", "a", "c", "b"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+        assert_eq!(deduped, vec!["a", "b", "c"]);
+    }
+
+    #[test]
     fn quick_capture_defaults_to_inbox() {
         let mut state = AppState::new(crate::db::open_in_memory().unwrap());
         state.quick_entry_buffer = "buy milk".to_string();
@@ -2340,6 +2363,27 @@ mod tests {
 
         assert!(!state.chat_busy);
         assert!(state.chat_focus_requested);
+    }
+
+    #[test]
+    fn repeated_identical_parse_failures_are_reported_once() {
+        // Reproduces a real failure mode: the model mangled the same task
+        // id the same way across several actions in one batch, producing
+        // the identical "unparsable task_id" error five times over.
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        let same_failure = "model returned an unparsable task_id \"bad\": invalid length"
+            .to_string();
+
+        state.receive_chat_reply(ChatReply {
+            reply: "Done.".to_string(),
+            actions: Vec::new(),
+            parse_failures: vec![same_failure.clone(); 5],
+        });
+
+        assert_eq!(
+            state.chat_history[0].content,
+            format!("Done.\n\n⚠ This didn't actually happen: {same_failure}")
+        );
     }
 
     #[test]
