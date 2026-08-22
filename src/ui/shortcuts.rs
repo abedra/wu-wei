@@ -80,8 +80,10 @@ fn handle_archive_confirm(ctx: &egui::Context, state: &mut AppState) {
 /// live. Each step also places the keyboard inside that perspective's content
 /// immediately (`AppState::focus_sidebar`/`move_sidebar_highlight` highlight
 /// its first task) — Space/Enter/M/D/delete all act on it right away, no
-/// extra step required. Tab still hands Up/Down themselves over to the
-/// content list, to move past that first item.
+/// extra step required. Right arrow or Tab hand control back to the content
+/// list, mirroring `handle_focus_sidebar`'s Left-arrow/Tab entry the other
+/// way — either key moves *between* the two sections; only Up/Down move
+/// *within* whichever one currently has control.
 fn handle_sidebar_navigation(ctx: &egui::Context, state: &mut AppState) {
     if !state.sidebar_focused {
         return;
@@ -92,17 +94,29 @@ fn handle_sidebar_navigation(ctx: &egui::Context, state: &mut AppState) {
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
         state.move_sidebar_highlight(-1);
     }
-    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
+    let exit = ctx.input_mut(|i| {
+        i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)
+            || i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+    });
+    if exit {
         state.exit_sidebar_focus();
     }
 }
 
-/// Left arrow moves keyboard control to the sidebar, highlighting whichever
-/// perspective is currently active. This is the sole entry point into sidebar
-/// navigation from the keyboard — deliberately not tied to egui's native
-/// Tab-focus landing on a sidebar button, which proved unreliable (focus
-/// timing between a click and a `gained_focus` check could desync which row
-/// Up/Down actually moved).
+/// Left arrow or Tab moves keyboard control from the content list to the
+/// sidebar, highlighting whichever perspective is currently active — the
+/// sole entry point into sidebar navigation from the keyboard, deliberately
+/// not tied to egui's native Tab-focus landing on a sidebar button, which
+/// proved unreliable (focus timing between a click and a `gained_focus`
+/// check could desync which row Up/Down actually moved). Both keys are
+/// skipped whenever a real widget already holds keyboard focus (a text
+/// field, a button, ...), so egui's native per-field Tab-cycling still works
+/// inside forms (Settings, task details, quick capture, ...) instead of
+/// always jumping to the sidebar — the task list's own keyboard cursor
+/// (`AppState::highlighted_task`) isn't real egui focus, so this fires for
+/// it, which is the case it's actually meant to cover: swapping sections
+/// instead of quietly landing focus on whatever button happens to sit
+/// nearest in the widget tree.
 fn handle_focus_sidebar(ctx: &egui::Context, state: &mut AppState) {
     if state.sidebar_focused || state.any_picker_open() {
         return;
@@ -110,7 +124,11 @@ fn handle_focus_sidebar(ctx: &egui::Context, state: &mut AppState) {
     if ctx.memory(|m| m.focused()).is_some() {
         return;
     }
-    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)) {
+    let enter = ctx.input_mut(|i| {
+        i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)
+            || i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+    });
+    if enter {
         let entries = state.sidebar_entries();
         let index = entries
             .iter()

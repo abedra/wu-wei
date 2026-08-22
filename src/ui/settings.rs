@@ -30,8 +30,11 @@ const SHORTCUT_GROUPS: &[(&str, &[(&str, &str)])] = &[
                 "Up / Down",
                 "Move the task cursor (or the sidebar selection, once focused)",
             ),
-            ("Left", "Move keyboard focus to the sidebar"),
-            ("Tab", "Hand Up/Down from the sidebar back to the task list"),
+            (
+                "Left / Right",
+                "Move keyboard focus between the sidebar and the task list",
+            ),
+            ("Tab", "Same as Left/Right, outside of a focused field"),
         ],
     ),
     (
