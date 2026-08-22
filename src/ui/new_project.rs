@@ -2,8 +2,8 @@ use eframe::egui;
 
 use crate::state::AppState;
 
-/// Fixed id so [`crate::ui::shortcuts`] can request focus on this field
-/// immediately when the popup opens.
+/// Fixed id so `draw` can request focus on this field immediately when the
+/// popup opens (see `AppState::new_project_focus_pending`).
 pub fn field_id() -> egui::Id {
     egui::Id::new("new_project_field")
 }
@@ -21,7 +21,12 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
         .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
         .show(ctx, |ui| {
             ui.label("Project name:");
-            ui.add(egui::TextEdit::singleline(&mut state.new_project_name).id(field_id()));
+            let response =
+                ui.add(egui::TextEdit::singleline(&mut state.new_project_name).id(field_id()));
+            if state.new_project_focus_pending {
+                state.new_project_focus_pending = false;
+                response.request_focus();
+            }
             ui.label("Enter to add - Esc to cancel");
         });
 }

@@ -260,9 +260,19 @@ pub struct AppState {
     /// floating window rather than a permanent panel, so it never sits in the
     /// normal Tab order when closed.
     pub quick_capture_open: bool,
+    /// One-shot flag consumed by `ui::quick_capture::draw` right after it
+    /// adds the field, so the actual `request_focus` call happens in the
+    /// same `draw` pass that creates the widget (see `ui::ai_chat`'s
+    /// `chat_focus_requested` for the same pattern) rather than from
+    /// `ui::shortcuts` a step earlier — requesting focus by id before the
+    /// widget for that frame even exists proved unreliable in practice.
+    pub quick_capture_focus_pending: bool,
     /// Whether the new-project popup is open (toggled by Cmd+Shift+N). Same
     /// floating-window shape as `quick_capture_open`.
     pub new_project_popup_open: bool,
+    /// Same one-shot purpose as `quick_capture_focus_pending`, for
+    /// `ui::new_project::draw`.
+    pub new_project_focus_pending: bool,
     pub new_project_name: String,
     pub project_picker: Option<ProjectPickerState>,
     pub due_date_picker: Option<DueDatePickerState>,
@@ -346,7 +356,9 @@ impl AppState {
             project_edit_buffer: None,
             quick_entry_buffer: String::new(),
             quick_capture_open: false,
+            quick_capture_focus_pending: false,
             new_project_popup_open: false,
+            new_project_focus_pending: false,
             new_project_name: String::new(),
             project_picker: None,
             due_date_picker: None,
@@ -594,10 +606,12 @@ impl AppState {
 
     pub fn open_quick_capture(&mut self) {
         self.quick_capture_open = true;
+        self.quick_capture_focus_pending = true;
     }
 
     pub fn close_quick_capture(&mut self) {
         self.quick_capture_open = false;
+        self.quick_capture_focus_pending = false;
         self.quick_entry_buffer.clear();
         self.llm_pending = None;
         self.llm_busy = false;
@@ -1525,10 +1539,12 @@ impl AppState {
 
     pub fn open_new_project_popup(&mut self) {
         self.new_project_popup_open = true;
+        self.new_project_focus_pending = true;
     }
 
     pub fn close_new_project_popup(&mut self) {
         self.new_project_popup_open = false;
+        self.new_project_focus_pending = false;
         self.new_project_name.clear();
     }
 
@@ -1649,6 +1665,7 @@ mod tests {
         state.open_quick_capture();
         assert!(state.quick_capture_open);
         assert!(state.any_picker_open());
+        assert!(state.quick_capture_focus_pending);
 
         state.quick_entry_buffer = "call dentist".to_string();
         state.quick_capture_submit();
@@ -1667,6 +1684,7 @@ mod tests {
         state.close_quick_capture();
 
         assert!(!state.quick_capture_open);
+        assert!(!state.quick_capture_focus_pending);
         assert!(state.quick_entry_buffer.is_empty());
         assert!(state.visible_tasks.is_empty());
     }

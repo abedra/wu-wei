@@ -2,8 +2,8 @@ use eframe::egui;
 
 use crate::state::{AppState, Perspective};
 
-/// Fixed id so [`crate::ui::shortcuts`] can request focus on this field
-/// immediately when the popup opens.
+/// Fixed id so `draw` can request focus on this field immediately when the
+/// popup opens (see `AppState::quick_capture_focus_pending`).
 pub fn field_id() -> egui::Id {
     egui::Id::new("quick_capture_field")
 }
@@ -37,10 +37,14 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
         .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
         .show(ctx, |ui| {
             ui.label(label);
-            ui.add_enabled(
+            let response = ui.add_enabled(
                 !state.llm_busy,
                 egui::TextEdit::singleline(&mut state.quick_entry_buffer).id(field_id()),
             );
+            if state.quick_capture_focus_pending {
+                state.quick_capture_focus_pending = false;
+                response.request_focus();
+            }
             if state.llm_busy {
                 ui.horizontal(|ui| {
                     ui.spinner();

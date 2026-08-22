@@ -1,7 +1,6 @@
 use eframe::egui;
 
 use crate::state::{AppState, Perspective};
-use crate::ui::{new_project, quick_capture};
 
 /// Global, OmniFocus-inspired keyboard shortcuts. Called once per frame, before
 /// any panel is drawn, so a shortcut fires regardless of which panel has focus.
@@ -187,7 +186,6 @@ fn handle_quick_capture(ctx: &egui::Context, state: &mut AppState) {
     let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::N);
     if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
         state.open_quick_capture();
-        ctx.memory_mut(|m| m.request_focus(quick_capture::field_id()));
     }
 }
 
@@ -214,7 +212,6 @@ fn handle_new_project_popup(ctx: &egui::Context, state: &mut AppState) {
     );
     if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
         state.open_new_project_popup();
-        ctx.memory_mut(|m| m.request_focus(new_project::field_id()));
     }
 }
 
