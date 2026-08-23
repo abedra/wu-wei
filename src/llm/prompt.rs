@@ -2,7 +2,7 @@ use chrono::{Duration, NaiveDate};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ChatAction, ChatContext, ChatReply, ParsedTask, PromptContext};
+use super::{ChatAction, ChatCalendarEventSummary, ChatContext, ChatReply, ParsedTask, PromptContext};
 use crate::domain::task::{Recurrence, RecurrenceUnit, TaskId};
 
 /// A precomputed weekday→date lookup for today plus the next 6 days, handed
@@ -25,6 +25,25 @@ fn weekday_reference(today: NaiveDate) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Today's Google Calendar events, ready to splice into the chat system
+/// prompt as JSON — `[]` when the calendar isn't connected or today's just
+/// empty, same "absent looks like empty" convention as `tasks_json`.
+fn calendar_events_json(events: &[ChatCalendarEventSummary]) -> String {
+    serde_json::to_string(
+        &events
+            .iter()
+            .map(|e| {
+                json!({
+                    "title": e.title,
+                    "time": e.time,
+                    "location": e.location,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".to_string())
 }
 
 /// Shared instructions given to whichever provider is configured — kept
@@ -183,6 +202,7 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
             .collect::<Vec<_>>(),
     )
     .unwrap_or_else(|_| "[]".to_string());
+    let calendar_json = calendar_events_json(&context.calendar_events);
 
     format!(
         "You are an assistant embedded in Wu Wei, a GTD-style task manager. The user talks to \
@@ -200,6 +220,16 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
          {projects}. Here is the user's current set of open (not \
          completed) tasks as JSON — only ever reference a task by an \"id\" value copied \
          verbatim from this list, never invent one: {tasks_json}\n\n\
+         Here are today's events from the user's connected Google Calendar as JSON (each with \
+         a \"title\", a \"time\" already in the user's local time zone — either a clock time or \
+         \"All day\" — and an optional \"location\"); an empty list just means nothing's on the \
+         calendar today, not that the calendar is disconnected: {calendar_json}\n\n\
+         Calendar events are read-only context, never something to act on — there is no action \
+         type for creating, moving, or deleting one, so only ever use them to answer questions \
+         about the user's day (e.g. \"what's on my schedule today?\", \"am I free at 3?\") or to \
+         factor into a task suggestion (e.g. avoid suggesting something that overlaps a \
+         meeting). Never propose a due_date/time for a task based solely on it landing near a \
+         calendar event unless the user actually asked for that.\n\n\
          Copy each \"id\" character-for-character exactly as it appears above, every time you \
          use one, no matter how many actions in a row target the same task — never shorten, \
          paraphrase, or trail off with \"...\" partway through one, and never reuse a digit \
@@ -274,6 +304,7 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
         weekdays = weekday_reference(context.today),
         projects = projects,
         tasks_json = tasks_json,
+        calendar_json = calendar_json,
     )
 }
 
@@ -532,6 +563,37 @@ mod tests {
             "Wednesday=2026-08-19 (today), Thursday=2026-08-20, Friday=2026-08-21, \
              Saturday=2026-08-22, Sunday=2026-08-23, Monday=2026-08-24, Tuesday=2026-08-25"
         );
+    }
+
+    #[test]
+    fn chat_system_prompt_includes_todays_calendar_events() {
+        let context = ChatContext {
+            today: NaiveDate::from_ymd_opt(2026, 8, 19).unwrap(),
+            tasks: Vec::new(),
+            project_names: Vec::new(),
+            calendar_events: vec![ChatCalendarEventSummary {
+                title: "Dentist".to_string(),
+                time: "2:00 PM".to_string(),
+                location: Some("123 Main St".to_string()),
+            }],
+        };
+        let prompt = chat_system_prompt(&context);
+        assert!(prompt.contains("\"title\":\"Dentist\""));
+        assert!(prompt.contains("\"time\":\"2:00 PM\""));
+        assert!(prompt.contains("\"location\":\"123 Main St\""));
+    }
+
+    #[test]
+    fn chat_system_prompt_shows_an_empty_calendar_as_an_empty_list() {
+        let context = ChatContext {
+            today: NaiveDate::from_ymd_opt(2026, 8, 19).unwrap(),
+            tasks: Vec::new(),
+            project_names: Vec::new(),
+            calendar_events: Vec::new(),
+        };
+        let prompt = chat_system_prompt(&context);
+        assert!(prompt.contains("Google Calendar as JSON"));
+        assert!(prompt.contains("not that the calendar is disconnected: []"));
     }
 
     fn extraction(title: &str, due_date: Option<&str>, project: Option<&str>) -> RawExtraction {

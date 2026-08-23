@@ -12,8 +12,8 @@ use crate::db_bootstrap;
 use crate::domain::project::{Project, ProjectId, ProjectKind, ProjectStatus};
 use crate::domain::task::{Recurrence, RecurrenceUnit, Task, TaskId};
 use crate::llm::{
-    self, ChatAction, ChatContext, ChatReply, ChatRole, ChatTaskSummary, ChatTurn, LlmConfig,
-    ParsedTask, PromptContext, ProviderKind,
+    self, ChatAction, ChatCalendarEventSummary, ChatContext, ChatReply, ChatRole,
+    ChatTaskSummary, ChatTurn, LlmConfig, ParsedTask, PromptContext, ProviderKind,
 };
 use crate::sync::{self, SyncSummary};
 
@@ -1028,10 +1028,24 @@ impl AppState {
                 due_date: t.due_date,
             })
             .collect();
+        let calendar_events = self
+            .calendar_events
+            .iter()
+            .map(|e| ChatCalendarEventSummary {
+                title: e.title.clone(),
+                time: if e.all_day {
+                    "All day".to_string()
+                } else {
+                    e.start.with_timezone(&Local).format("%-I:%M %p").to_string()
+                },
+                location: e.location.clone(),
+            })
+            .collect();
         ChatContext {
             today: Local::now().date_naive(),
             tasks,
             project_names: self.projects.iter().map(|p| p.name.clone()).collect(),
+            calendar_events,
         }
     }
 

@@ -50,10 +50,22 @@ pub struct ChatTaskSummary {
     pub due_date: Option<NaiveDate>,
 }
 
+/// Today's Google Calendar events, for the model's awareness only — there's
+/// no action to create/move/delete a calendar event, so this is handed over
+/// purely as read-only context (e.g. "am I free this afternoon?", "what's on
+/// my plate today?"). `time` is already formatted in the user's local time
+/// (or "All day"), matching what `ui::task_list` shows.
+pub struct ChatCalendarEventSummary {
+    pub title: String,
+    pub time: String,
+    pub location: Option<String>,
+}
+
 pub struct ChatContext {
     pub today: NaiveDate,
     pub tasks: Vec<ChatTaskSummary>,
     pub project_names: Vec<String>,
+    pub calendar_events: Vec<ChatCalendarEventSummary>,
 }
 
 /// A single database mutation the model asked for, already validated (task
