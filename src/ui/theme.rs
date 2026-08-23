@@ -7,6 +7,9 @@ pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(88, 166, 255);
 pub const WARM: egui::Color32 = egui::Color32::from_rgb(240, 165, 55);
 /// Warm/red color for overdue due dates.
 pub const OVERDUE: egui::Color32 = egui::Color32::from_rgb(235, 108, 108);
+/// Green used for positive/success indicators (e.g. the connected-calendar
+/// checkmark).
+pub const SUCCESS: egui::Color32 = egui::Color32::from_rgb(63, 185, 80);
 
 const BASE: egui::Color32 = egui::Color32::from_rgb(22, 24, 28);
 const PANEL: egui::Color32 = egui::Color32::from_rgb(27, 29, 34);

@@ -151,7 +151,7 @@ pub struct SettingsDraft {
     /// client secret field.
     pub show_gcal_client_secret: bool,
     /// Whether `settings` already has a Google refresh token saved —
-    /// display-only (drives "Connect" vs "✓ Connected" in `ui::settings`),
+    /// display-only (drives "Connect" vs "Connected" in `ui::settings`),
     /// never itself written back on Save; only `AppState::poll_google_auth`/
     /// `disconnect_google_calendar` ever touch the actual token settings.
     pub gcal_connected: bool,

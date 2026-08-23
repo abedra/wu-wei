@@ -10,6 +10,20 @@ pub fn api_key_field_id() -> egui::Id {
     egui::Id::new("settings_api_key_field")
 }
 
+/// Draws a small checkmark glyph, painted as a stroked polyline rather than
+/// a Unicode character — egui's bundled fonts don't cover U+2713, so a text
+/// glyph falls back to a placeholder box instead of an actual checkmark.
+fn checkmark_icon(ui: &mut egui::Ui, size: f32, color: egui::Color32) {
+    let (rect, _response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let points = vec![
+        egui::pos2(rect.left() + size * 0.15, rect.top() + size * 0.52),
+        egui::pos2(rect.left() + size * 0.42, rect.top() + size * 0.78),
+        egui::pos2(rect.left() + size * 0.85, rect.top() + size * 0.22),
+    ];
+    ui.painter()
+        .add(egui::Shape::line(points, egui::Stroke::new(2.0, color)));
+}
+
 /// A hand-maintained mirror of the shortcuts wired up in `ui::shortcuts` —
 /// that module has no self-describing registry to generate this list from,
 /// so keep the two in sync by hand when a shortcut is added or changed.
@@ -234,7 +248,18 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
             });
             ui.horizontal(|ui| {
                 if draft.gcal_connected {
-                    ui.colored_label(theme::ACCENT, "\u{2713} Connected");
+                    // egui's horizontal layout reserves row height from
+                    // `interact_size.y` before any widget is added; the
+                    // button below actually renders taller than that (text
+                    // height plus its own padding), so without this the
+                    // checkmark/label get centered against the smaller
+                    // guessed height and sit visibly above the button once
+                    // it stretches the row.
+                    let button_height = ui.text_style_height(&egui::TextStyle::Button)
+                        + 2.0 * ui.spacing().button_padding.y;
+                    ui.set_min_height(button_height);
+                    checkmark_icon(ui, 14.0, theme::SUCCESS);
+                    ui.colored_label(theme::ACCENT, "Connected");
                     if ui.button("Disconnect").clicked() {
                         disconnect_gcal_clicked = true;
                     }
