@@ -18,10 +18,10 @@ impl WuWeiApp {
             .egui_ctx
             .load_texture("app_logo", image, egui::TextureOptions::LINEAR);
 
-        Self {
-            state: AppState::new(conn),
-            icon,
-        }
+        let mut state = AppState::new(conn);
+        state.set_perspective(crate::state::Perspective::Today);
+
+        Self { state, icon }
     }
 }
 
