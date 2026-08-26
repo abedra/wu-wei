@@ -75,7 +75,12 @@ fn recurrence_field(
     changed
 }
 
-fn date_field(ui: &mut egui::Ui, label: &str, date: &mut Option<NaiveDate>) -> bool {
+fn date_field(
+    ui: &mut egui::Ui,
+    label: &str,
+    date: &mut Option<NaiveDate>,
+    show_today_button: bool,
+) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         let mut has_date = date.is_some();
@@ -92,6 +97,16 @@ fn date_field(ui: &mut egui::Ui, label: &str, date: &mut Option<NaiveDate>) -> b
             if ui.add(DatePickerButton::new(&mut jiff_date)).changed() {
                 *d = jiff_to_naive(jiff_date);
                 changed = true;
+            }
+            // A one-click way back to today after the calendar's been
+            // navigated elsewhere — the calendar itself has no shortcut for
+            // "today" beyond paging back to the current month by hand.
+            if show_today_button && ui.small_button("Today").clicked() {
+                let today = chrono::Local::now().date_naive();
+                if *d != today {
+                    *d = today;
+                    changed = true;
+                }
             }
         }
     });
@@ -148,8 +163,8 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
 
-        dirty |= date_field(ui, "Due date", &mut buf.due_date);
-        dirty |= date_field(ui, "Defer date", &mut buf.defer_date);
+        dirty |= date_field(ui, "Due date", &mut buf.due_date, true);
+        dirty |= date_field(ui, "Defer date", &mut buf.defer_date, false);
         dirty |= recurrence_field(ui, &mut buf.recurrence, &mut buf.due_date);
 
         let mut completed = buf.completed;
