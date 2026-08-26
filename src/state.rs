@@ -37,6 +37,49 @@ pub enum Selection {
     Project(ProjectId),
 }
 
+/// How `visible_tasks` is ordered on top of whatever a perspective's own
+/// query already returns. `Natural` leaves the per-perspective order (see
+/// `AppState::refresh_visible_tasks`) untouched; the other variants apply an
+/// in-memory re-sort so they work the same regardless of perspective.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TaskSortKey {
+    #[default]
+    Natural,
+    DueDate,
+    Project,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortDirection {
+    #[default]
+    Ascending,
+    Descending,
+}
+
+impl SortDirection {
+    fn toggled(self) -> Self {
+        match self {
+            SortDirection::Ascending => SortDirection::Descending,
+            SortDirection::Descending => SortDirection::Ascending,
+        }
+    }
+}
+
+/// The name shown for a task's project column: the project's own name, or
+/// "Inbox" for a task that isn't assigned to one. Shared by the task list's
+/// project column and its project-name sort so both agree on what a task's
+/// project "is".
+pub fn project_display_name(project_id: Option<ProjectId>, projects: &[Project]) -> String {
+    match project_id {
+        None => "Inbox".to_string(),
+        Some(pid) => projects
+            .iter()
+            .find(|p| p.id == pid)
+            .map(|p| p.name.clone())
+            .unwrap_or_default(),
+    }
+}
+
 /// A small keyboard-driven picker for reassigning a task's project.
 /// `highlighted` indexes a virtual list: `0` is Inbox, `i + 1` is `AppState.projects[i]`.
 pub struct ProjectPickerState {
@@ -281,6 +324,11 @@ pub struct AppState {
     /// periodic repaint request that keeps frames happening even when the
     /// app is otherwise idle.
     pub last_seen_date: NaiveDate,
+    /// User-chosen override applied on top of the current perspective's
+    /// natural order (see `TaskSortKey`), toggled by clicking the "Due" or
+    /// "Project" column header in `ui::task_list`.
+    pub sort_key: TaskSortKey,
+    pub sort_direction: SortDirection,
     pub selection: Selection,
     /// Keyboard cursor over `visible_tasks`, moved by the Up/Down arrows.
     /// Independent of `selection`: moving it does not open the detail panel
@@ -421,6 +469,8 @@ impl AppState {
             visible_tasks: Vec::new(),
             perspective: Perspective::Inbox,
             last_seen_date: Local::now().date_naive(),
+            sort_key: TaskSortKey::default(),
+            sort_direction: SortDirection::default(),
             selection: Selection::None,
             highlighted_task: None,
             task_edit_buffer: None,
@@ -564,10 +614,67 @@ impl AppState {
             Perspective::Project(id) => task_repo::list_by_project(&self.conn, id),
         };
         self.visible_tasks = self.unwrap_or_report(result, Vec::new());
+        self.sort_visible_tasks();
         if let Some(id) = self.highlighted_task
             && !self.visible_tasks.iter().any(|t| t.id == id)
         {
             self.highlighted_task = None;
+        }
+    }
+
+    /// Picks `key` as the sort applied on top of the current perspective
+    /// (see `TaskSortKey`): clicking the same header again flips direction,
+    /// clicking a different one switches to it. Due date defaults to
+    /// descending on first click — the common case of wanting the furthest-
+    /// out work at the top with undated tasks trailing behind everything —
+    /// while project defaults to ascending (alphabetical).
+    pub fn set_sort(&mut self, key: TaskSortKey) {
+        if self.sort_key == key {
+            self.sort_direction = self.sort_direction.toggled();
+        } else {
+            self.sort_key = key;
+            self.sort_direction = match key {
+                TaskSortKey::DueDate => SortDirection::Descending,
+                TaskSortKey::Natural | TaskSortKey::Project => SortDirection::Ascending,
+            };
+        }
+        self.sort_visible_tasks();
+    }
+
+    /// Re-sorts `visible_tasks` in place per `sort_key`/`sort_direction`,
+    /// without re-querying the database. `Natural` leaves the perspective
+    /// query's own order alone. `DueDate` always sorts tasks with no due
+    /// date last, regardless of direction — an undated task has nothing to
+    /// compare, so there's no sense in which it's "later" or "earlier" than
+    /// a dated one.
+    fn sort_visible_tasks(&mut self) {
+        match self.sort_key {
+            TaskSortKey::Natural => {}
+            TaskSortKey::DueDate => {
+                let direction = self.sort_direction;
+                self.visible_tasks
+                    .sort_by(|a, b| match (a.due_date, b.due_date) {
+                        (None, None) => std::cmp::Ordering::Equal,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (Some(x), Some(y)) => match direction {
+                            SortDirection::Ascending => x.cmp(&y),
+                            SortDirection::Descending => y.cmp(&x),
+                        },
+                    });
+            }
+            TaskSortKey::Project => {
+                let direction = self.sort_direction;
+                let projects = &self.projects;
+                self.visible_tasks.sort_by(|a, b| {
+                    let name_a = project_display_name(a.project_id, projects);
+                    let name_b = project_display_name(b.project_id, projects);
+                    match direction {
+                        SortDirection::Ascending => name_a.cmp(&name_b),
+                        SortDirection::Descending => name_b.cmp(&name_a),
+                    }
+                });
+            }
         }
     }
 
@@ -3515,5 +3622,142 @@ mod tests {
             status.contains("isn't available"),
             "unexpected status: {status}"
         );
+    }
+
+    #[test]
+    fn set_sort_by_due_date_defaults_to_descending_with_no_due_date_last() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        let today = Local::now().date_naive();
+
+        state.quick_entry_buffer = "no due date".to_string();
+        state.quick_capture_submit();
+
+        state.quick_entry_buffer = "due soon".to_string();
+        state.quick_capture_submit();
+        let due_soon_id = state
+            .visible_tasks
+            .iter()
+            .find(|t| t.title == "due soon")
+            .unwrap()
+            .id;
+        state.select_task(due_soon_id);
+        state.task_edit_buffer.as_mut().unwrap().due_date = Some(today + Duration::days(1));
+        state.save_task_edits();
+
+        state.quick_entry_buffer = "due later".to_string();
+        state.quick_capture_submit();
+        let due_later_id = state
+            .visible_tasks
+            .iter()
+            .find(|t| t.title == "due later")
+            .unwrap()
+            .id;
+        state.select_task(due_later_id);
+        state.task_edit_buffer.as_mut().unwrap().due_date = Some(today + Duration::days(5));
+        state.save_task_edits();
+
+        state.set_sort(TaskSortKey::DueDate);
+        assert_eq!(state.sort_direction, SortDirection::Descending);
+
+        let titles: Vec<&str> = state
+            .visible_tasks
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(titles, ["due later", "due soon", "no due date"]);
+
+        // Clicking the same header again flips to ascending, still with the
+        // undated task last.
+        state.set_sort(TaskSortKey::DueDate);
+        assert_eq!(state.sort_direction, SortDirection::Ascending);
+        let titles: Vec<&str> = state
+            .visible_tasks
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(titles, ["due soon", "due later", "no due date"]);
+    }
+
+    #[test]
+    fn set_sort_by_project_orders_alphabetically_and_toggles_direction() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+
+        state.new_project_name = "Zzz Project".to_string();
+        state.create_project();
+        let zzz_id = state
+            .projects
+            .iter()
+            .find(|p| p.name == "Zzz Project")
+            .unwrap()
+            .id;
+
+        state.new_project_name = "Aaa Project".to_string();
+        state.create_project();
+        let aaa_id = state
+            .projects
+            .iter()
+            .find(|p| p.name == "Aaa Project")
+            .unwrap()
+            .id;
+
+        state.set_perspective(Perspective::Project(zzz_id));
+        state.quick_entry_buffer = "zzz task".to_string();
+        state.quick_capture_submit();
+
+        state.set_perspective(Perspective::Project(aaa_id));
+        state.quick_entry_buffer = "aaa task".to_string();
+        state.quick_capture_submit();
+
+        state.set_perspective(Perspective::Review);
+        state.quick_entry_buffer = "inbox task".to_string();
+        state.quick_capture_submit();
+
+        state.set_sort(TaskSortKey::Project);
+        assert_eq!(state.sort_direction, SortDirection::Ascending);
+        let titles: Vec<&str> = state
+            .visible_tasks
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(titles, ["aaa task", "inbox task", "zzz task"]);
+
+        state.set_sort(TaskSortKey::Project);
+        assert_eq!(state.sort_direction, SortDirection::Descending);
+        let titles: Vec<&str> = state
+            .visible_tasks
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(titles, ["zzz task", "inbox task", "aaa task"]);
+    }
+
+    #[test]
+    fn switching_perspective_preserves_the_chosen_sort() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        let today = Local::now().date_naive();
+
+        state.quick_entry_buffer = "no due date".to_string();
+        state.quick_capture_submit();
+        state.quick_entry_buffer = "due today".to_string();
+        state.quick_capture_submit();
+        let due_today_id = state
+            .visible_tasks
+            .iter()
+            .find(|t| t.title == "due today")
+            .unwrap()
+            .id;
+        state.select_task(due_today_id);
+        state.task_edit_buffer.as_mut().unwrap().due_date = Some(today);
+        state.save_task_edits();
+
+        state.set_sort(TaskSortKey::DueDate);
+        state.set_perspective(Perspective::Review);
+
+        let titles: Vec<&str> = state
+            .visible_tasks
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(titles, ["due today", "no due date"]);
     }
 }

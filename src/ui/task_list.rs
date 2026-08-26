@@ -4,7 +4,9 @@ use egui_extras::{Column, TableBuilder};
 
 use crate::domain::project::ProjectId;
 use crate::domain::task::TaskId;
-use crate::state::{AppState, Perspective, Selection};
+use crate::state::{
+    AppState, Perspective, Selection, SortDirection, TaskSortKey, project_display_name,
+};
 use crate::ui::theme;
 
 /// Read-only "Today's Events" block sourced from a connected Google
@@ -51,6 +53,51 @@ fn draw_calendar_events(ui: &mut egui::Ui, state: &AppState) {
     ui.add_space(8.0);
 }
 
+/// A clickable column header that doubles as the current sort indicator:
+/// plain text normally, with a small triangle appended when `key` is the
+/// active sort. Clicking sorts by `key`, or flips direction if it's already
+/// active (see `AppState::set_sort`).
+///
+/// The triangle is painted as a vector shape (mirroring how egui itself
+/// draws the `ComboBox`/`CollapsingHeader` arrows) rather than set as a
+/// Unicode glyph like ▲/▼ — those aren't in the default egui font and show
+/// up as a missing-glyph box.
+fn sort_header(
+    ui: &mut egui::Ui,
+    label: &str,
+    key: TaskSortKey,
+    state: &AppState,
+) -> egui::Response {
+    let active = state.sort_key == key;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let mut response = ui
+            .add(egui::Label::new(egui::RichText::new(label).strong()).sense(egui::Sense::click()));
+        if active {
+            let size = egui::vec2(8.0, 6.0);
+            let (rect, arrow_response) = ui.allocate_exact_size(size, egui::Sense::click());
+            if ui.is_rect_visible(rect) {
+                let points = match state.sort_direction {
+                    SortDirection::Ascending => {
+                        vec![rect.left_bottom(), rect.right_bottom(), rect.center_top()]
+                    }
+                    SortDirection::Descending => {
+                        vec![rect.left_top(), rect.right_top(), rect.center_bottom()]
+                    }
+                };
+                ui.painter().add(egui::Shape::convex_polygon(
+                    points,
+                    ui.visuals().strong_text_color(),
+                    egui::Stroke::NONE,
+                ));
+            }
+            response = response.union(arrow_response);
+        }
+        response
+    })
+    .inner
+}
+
 pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     draw_calendar_events(ui, state);
 
@@ -64,19 +111,12 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     }
 
     let project_name = |id: Option<ProjectId>, state: &AppState| -> String {
-        match id {
-            None => "Inbox".to_string(),
-            Some(pid) => state
-                .projects
-                .iter()
-                .find(|p| p.id == pid)
-                .map(|p| p.name.clone())
-                .unwrap_or_default(),
-        }
+        project_display_name(id, &state.projects)
     };
 
     let mut to_toggle_complete: Option<(TaskId, bool)> = None;
     let mut to_select: Option<TaskId> = None;
+    let mut sort_clicked: Option<TaskSortKey> = None;
     let today = Local::now().date_naive();
 
     // `Column::auto()` only converges to the right width after a couple of
@@ -118,10 +158,14 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.strong("Title");
             });
             header.col(|ui| {
-                ui.strong("Due");
+                if sort_header(ui, "Due", TaskSortKey::DueDate, state).clicked() {
+                    sort_clicked = Some(TaskSortKey::DueDate);
+                }
             });
             header.col(|ui| {
-                ui.strong("Project");
+                if sort_header(ui, "Project", TaskSortKey::Project, state).clicked() {
+                    sort_clicked = Some(TaskSortKey::Project);
+                }
             });
         })
         .body(|body| {
@@ -182,5 +226,8 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     }
     if let Some(id) = to_select {
         state.select_task(id);
+    }
+    if let Some(key) = sort_clicked {
+        state.set_sort(key);
     }
 }
