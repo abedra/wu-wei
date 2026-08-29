@@ -49,6 +49,7 @@ pub enum TaskSortKey {
     Natural,
     DueDate,
     Project,
+    Estimate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -105,6 +106,88 @@ pub struct DueDatePickerState {
     /// The last typed-date attempt's failure ("couldn't read a date from
     /// that", no provider configured, ...), shown inline in the picker.
     pub ai_error: Option<String>,
+}
+
+/// A small keyboard-driven picker for setting a task's time estimate.
+/// `highlighted` indexes into [`estimate_picker_options`].
+pub struct EstimatePickerState {
+    pub task_id: TaskId,
+    pub highlighted: usize,
+    /// Free-text minutes/hours field, e.g. "90", "45m", "1h30m" — parsed
+    /// locally by [`parse_estimate`], no AI involved (unlike the due-date
+    /// picker's typed field).
+    pub text_input: String,
+    /// The last typed-estimate attempt's failure, shown inline in the picker.
+    pub error: Option<String>,
+}
+
+/// Quick estimate choices offered by the picker, paired with the whole
+/// minutes each resolves to (`None` clears the estimate).
+pub fn estimate_picker_options() -> Vec<(String, Option<i64>)> {
+    vec![
+        ("No Estimate".to_string(), None),
+        ("15 min".to_string(), Some(15)),
+        ("30 min".to_string(), Some(30)),
+        ("45 min".to_string(), Some(45)),
+        ("1 hour".to_string(), Some(60)),
+        ("1.5 hours".to_string(), Some(90)),
+        ("2 hours".to_string(), Some(120)),
+        ("3 hours".to_string(), Some(180)),
+        ("4 hours".to_string(), Some(240)),
+    ]
+}
+
+/// Parses a short estimate phrase into whole minutes. Accepts a bare number
+/// as minutes ("90"), an `h`/`m` combo ("1h", "1h30m", "45m", "2 hours"),
+/// or decimal hours ("1.5h"). Returns `None` when nothing sensible can be
+/// read or the result isn't positive.
+pub fn parse_estimate(text: &str) -> Option<i64> {
+    let s: String = text
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Bare number → minutes.
+    if let Ok(n) = s.parse::<f64>() {
+        let m = n.round() as i64;
+        return (m > 0).then_some(m);
+    }
+
+    let mut minutes = 0.0_f64;
+    let mut matched = false;
+    let mut rest = s.as_str();
+
+    if let Some(idx) = rest.find('h') {
+        let hours: f64 = rest[..idx].parse().ok()?;
+        minutes += hours * 60.0;
+        matched = true;
+        // Drop the rest of a spelled-out unit ("hr", "hours") before the
+        // trailing minutes portion.
+        rest = rest[idx + 1..].trim_start_matches(|c: char| c.is_alphabetic());
+    }
+
+    if !rest.is_empty() {
+        let digits: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        if digits.is_empty() {
+            if !matched {
+                return None;
+            }
+        } else {
+            minutes += digits.parse::<f64>().ok()?;
+            matched = true;
+        }
+    }
+
+    let m = minutes.round() as i64;
+    (matched && m > 0).then_some(m)
 }
 
 /// The next Saturday from `today`, or `today` itself if it's already a
@@ -386,6 +469,7 @@ pub struct AppState {
     pub new_project_name: String,
     pub project_picker: Option<ProjectPickerState>,
     pub due_date_picker: Option<DueDatePickerState>,
+    pub estimate_picker: Option<EstimatePickerState>,
     /// Whether keyboard control is currently on the sidebar (see
     /// [`AppState::focus_sidebar`]): Up/Down step through perspectives instead
     /// of the task list, and other task shortcuts (Space, M, D, ...) stand down.
@@ -513,6 +597,7 @@ impl AppState {
             new_project_name: String::new(),
             project_picker: None,
             due_date_picker: None,
+            estimate_picker: None,
             sidebar_focused: false,
             detail_panel_open: false,
             archive_confirm_open: false,
@@ -666,7 +751,9 @@ impl AppState {
             self.sort_key = key;
             self.sort_direction = match key {
                 TaskSortKey::DueDate => SortDirection::Descending,
-                TaskSortKey::Natural | TaskSortKey::Project => SortDirection::Ascending,
+                TaskSortKey::Natural | TaskSortKey::Project | TaskSortKey::Estimate => {
+                    SortDirection::Ascending
+                }
             };
         }
         self.sort_visible_tasks();
@@ -693,6 +780,22 @@ impl AppState {
                             SortDirection::Descending => y.cmp(&x),
                         },
                     });
+            }
+            TaskSortKey::Estimate => {
+                let direction = self.sort_direction;
+                // Like `DueDate`, a task with no estimate has nothing to
+                // compare, so it always sorts last regardless of direction.
+                self.visible_tasks.sort_by(|a, b| {
+                    match (a.estimated_minutes, b.estimated_minutes) {
+                        (None, None) => std::cmp::Ordering::Equal,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (Some(x), Some(y)) => match direction {
+                            SortDirection::Ascending => x.cmp(&y),
+                            SortDirection::Descending => y.cmp(&x),
+                        },
+                    }
+                });
             }
             TaskSortKey::Project => {
                 let direction = self.sort_direction;
@@ -1810,11 +1913,12 @@ impl AppState {
         self.refresh_visible_tasks();
     }
 
-    /// Whether any keyboard-driven picker (project or due date) is currently
-    /// open, so callers can avoid opening a second one on top of it.
+    /// Whether any keyboard-driven picker (project, due date, or estimate) is
+    /// currently open, so callers can avoid opening a second one on top of it.
     pub fn any_picker_open(&self) -> bool {
         self.project_picker.is_some()
             || self.due_date_picker.is_some()
+            || self.estimate_picker.is_some()
             || self.quick_capture_open
             || self.new_project_popup_open
             || self.settings.is_some()
@@ -2149,6 +2253,112 @@ impl AppState {
             return;
         };
         task.due_date = due_date;
+        if let Err(e) = task_repo::update(&self.conn, &task) {
+            self.error_message = Some(e.to_string());
+            return;
+        }
+        self.refresh_visible_tasks();
+    }
+
+    /// Opens the keyboard-driven estimate picker for the highlighted task,
+    /// pre-highlighting whichever quick option matches its current estimate
+    /// (falling back to "No Estimate" if it doesn't match one exactly).
+    pub fn open_estimate_picker(&mut self) {
+        let Some(task_id) = self.highlighted_task else {
+            return;
+        };
+        let current = self
+            .visible_tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .and_then(|t| t.estimated_minutes);
+        let highlighted = estimate_picker_options()
+            .iter()
+            .position(|(_, minutes)| *minutes == current)
+            .unwrap_or(0);
+        self.estimate_picker = Some(EstimatePickerState {
+            task_id,
+            highlighted,
+            text_input: String::new(),
+            error: None,
+        });
+    }
+
+    pub fn close_estimate_picker(&mut self) {
+        self.estimate_picker = None;
+    }
+
+    pub fn move_estimate_picker_highlight(&mut self, delta: i32) {
+        let Some(picker) = &mut self.estimate_picker else {
+            return;
+        };
+        let max = estimate_picker_options().len() as i32 - 1;
+        picker.highlighted = (picker.highlighted as i32 + delta).clamp(0, max) as usize;
+    }
+
+    /// Confirms the picker's currently highlighted row.
+    pub fn confirm_estimate_picker(&mut self) {
+        let Some(picker) = self.estimate_picker.take() else {
+            return;
+        };
+        self.apply_picked_estimate(picker.task_id, picker.highlighted);
+    }
+
+    /// Confirms a specific row directly, e.g. on click (bypassing `highlighted`).
+    pub fn pick_estimate_in_picker(&mut self, index: usize) {
+        let Some(picker) = self.estimate_picker.take() else {
+            return;
+        };
+        self.apply_picked_estimate(picker.task_id, index);
+    }
+
+    fn apply_picked_estimate(&mut self, task_id: TaskId, index: usize) {
+        let Some((_, minutes)) = estimate_picker_options().get(index).cloned() else {
+            return;
+        };
+        self.set_task_estimate(task_id, minutes);
+    }
+
+    /// Enter in the picker's free-text field: parses the typed phrase
+    /// ("90", "1h30m", ...) locally into minutes and applies it. A no-op
+    /// when the field is blank; sets an inline error when it can't be read.
+    pub fn submit_estimate_picker_text(&mut self) {
+        let Some(picker) = &mut self.estimate_picker else {
+            return;
+        };
+        let text = picker.text_input.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        match parse_estimate(&text) {
+            Some(minutes) => {
+                let task_id = picker.task_id;
+                self.estimate_picker = None;
+                self.set_task_estimate(task_id, Some(minutes));
+            }
+            None => {
+                picker.error =
+                    Some("Couldn't read an estimate from that — try \"90\", \"45m\", \"1h30m\".".to_string());
+            }
+        }
+    }
+
+    /// Writes `estimated_minutes` (`None` clears it) onto `task_id`, whether
+    /// it's currently open in the detail editor or only in the list — the
+    /// shared tail of both the quick-option picker and its typed field.
+    fn set_task_estimate(&mut self, task_id: TaskId, minutes: Option<i64>) {
+        if let Some(buf) = &mut self.task_edit_buffer
+            && buf.id == task_id
+        {
+            buf.estimated_minutes = minutes;
+            self.save_task_edits();
+            return;
+        }
+
+        let Some(mut task) = self.visible_tasks.iter().find(|t| t.id == task_id).cloned() else {
+            return;
+        };
+        task.estimated_minutes = minutes;
         if let Err(e) = task_repo::update(&self.conn, &task) {
             self.error_message = Some(e.to_string());
             return;
@@ -3479,6 +3689,80 @@ mod tests {
     }
 
     #[test]
+    fn estimate_picker_options_lists_no_estimate_first() {
+        let options = estimate_picker_options();
+        assert_eq!(options[0], ("No Estimate".to_string(), None));
+        assert_eq!(options[1].1, Some(15));
+    }
+
+    #[test]
+    fn parse_estimate_reads_the_common_forms() {
+        assert_eq!(parse_estimate("90"), Some(90));
+        assert_eq!(parse_estimate("45m"), Some(45));
+        assert_eq!(parse_estimate("45 min"), Some(45));
+        assert_eq!(parse_estimate("2h"), Some(120));
+        assert_eq!(parse_estimate("2 hours"), Some(120));
+        assert_eq!(parse_estimate("1h30m"), Some(90));
+        assert_eq!(parse_estimate("1h 30"), Some(90));
+        assert_eq!(parse_estimate("1.5h"), Some(90));
+        assert_eq!(parse_estimate(""), None);
+        assert_eq!(parse_estimate("0"), None);
+        assert_eq!(parse_estimate("soon"), None);
+    }
+
+    #[test]
+    fn estimate_picker_sets_minutes_on_highlighted_task_without_opening_details() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "draft proposal".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+
+        state.move_highlight(1);
+        assert_eq!(state.selection, Selection::None);
+
+        state.open_estimate_picker();
+        assert!(state.estimate_picker.is_some());
+        state.move_estimate_picker_highlight(4); // 0 = None … 4 = "1 hour"
+        state.confirm_estimate_picker();
+
+        assert!(state.estimate_picker.is_none());
+        let updated = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert_eq!(updated.estimated_minutes, Some(60));
+    }
+
+    #[test]
+    fn estimate_picker_text_field_parses_a_typed_value() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "draft proposal".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        state.move_highlight(1);
+        state.open_estimate_picker();
+
+        state.estimate_picker.as_mut().unwrap().text_input = "1h30m".to_string();
+        state.submit_estimate_picker_text();
+
+        assert!(state.estimate_picker.is_none());
+        let updated = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert_eq!(updated.estimated_minutes, Some(90));
+    }
+
+    #[test]
+    fn estimate_picker_text_field_reports_an_unreadable_value() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "draft proposal".to_string();
+        state.quick_capture_submit();
+        state.move_highlight(1);
+        state.open_estimate_picker();
+
+        state.estimate_picker.as_mut().unwrap().text_input = "whenever".to_string();
+        state.submit_estimate_picker_text();
+
+        let picker = state.estimate_picker.as_ref().unwrap();
+        assert!(picker.error.is_some());
+    }
+
+    #[test]
     fn submit_due_date_picker_text_without_a_provider_sets_an_inline_error() {
         let mut state = AppState::new(crate::db::open_in_memory().unwrap());
         state.llm_config = None;
@@ -4096,6 +4380,49 @@ mod tests {
             .map(|t| t.title.as_str())
             .collect();
         assert_eq!(titles, ["due soon", "due later", "no due date"]);
+    }
+
+    #[test]
+    fn set_sort_by_estimate_defaults_to_ascending_with_no_estimate_last() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+
+        state.quick_entry_buffer = "no estimate".to_string();
+        state.quick_capture_submit();
+
+        state.quick_entry_buffer = "quick".to_string();
+        state.quick_capture_submit();
+        let quick_id = state
+            .visible_tasks
+            .iter()
+            .find(|t| t.title == "quick")
+            .unwrap()
+            .id;
+        state.select_task(quick_id);
+        state.task_edit_buffer.as_mut().unwrap().estimated_minutes = Some(15);
+        state.save_task_edits();
+
+        state.quick_entry_buffer = "long".to_string();
+        state.quick_capture_submit();
+        let long_id = state
+            .visible_tasks
+            .iter()
+            .find(|t| t.title == "long")
+            .unwrap()
+            .id;
+        state.select_task(long_id);
+        state.task_edit_buffer.as_mut().unwrap().estimated_minutes = Some(240);
+        state.save_task_edits();
+
+        state.set_sort(TaskSortKey::Estimate);
+        assert_eq!(state.sort_direction, SortDirection::Ascending);
+        let titles: Vec<&str> = state.visible_tasks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["quick", "long", "no estimate"]);
+
+        // Flip to descending, undated task still last.
+        state.set_sort(TaskSortKey::Estimate);
+        assert_eq!(state.sort_direction, SortDirection::Descending);
+        let titles: Vec<&str> = state.visible_tasks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["long", "quick", "no estimate"]);
     }
 
     #[test]

@@ -63,6 +63,7 @@ impl eframe::App for WuWeiApp {
         ui::shortcuts::handle(&ctx, &mut self.state);
         ui::project_picker::draw(&ctx, &mut self.state);
         ui::due_date_picker::draw(&ctx, &mut self.state);
+        ui::estimate_picker::draw(&ctx, &mut self.state);
         ui::quick_capture::draw(&ctx, &mut self.state);
         ui::new_project::draw(&ctx, &mut self.state);
         ui::settings::draw(&ctx, &mut self.state);

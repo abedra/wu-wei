@@ -99,6 +99,7 @@ src/
 | `Space` | Toggle the highlighted task complete/incomplete |
 | `M` | Open the "move to project" picker |
 | `D` | Open the due-date picker |
+| `E` | Open the estimate picker |
 | `Cmd+Backspace` | Delete the highlighted task |
 | `Escape` | Close whatever popup/picker is open |
 

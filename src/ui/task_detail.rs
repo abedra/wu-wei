@@ -125,6 +125,38 @@ fn recurrence_field(
     changed
 }
 
+/// Optional time estimate, stored as whole minutes (`estimated_minutes`).
+/// Same checkbox-to-enable shape as [`date_field`]: unchecking clears it,
+/// checking seeds a default of 15 minutes.
+fn estimate_field(ui: &mut egui::Ui, minutes: &mut Option<i64>) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let mut has_estimate = minutes.is_some();
+        if ui.checkbox(&mut has_estimate, "Estimate").changed() {
+            *minutes = has_estimate.then_some(15);
+            changed = true;
+        }
+        if let Some(m) = minutes {
+            let mut value = (*m).max(0);
+            if ui
+                .add(
+                    egui::DragValue::new(&mut value)
+                        .range(0..=100_000)
+                        .suffix(" min"),
+                )
+                .changed()
+            {
+                *m = value.max(0);
+                changed = true;
+            }
+            if *m >= 60 {
+                ui.weak(crate::ui::format_estimate(*m));
+            }
+        }
+    });
+    changed
+}
+
 fn date_field(
     ui: &mut egui::Ui,
     label: &str,
@@ -216,6 +248,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
         dirty |= date_field(ui, "Due date", &mut buf.due_date, true);
         dirty |= date_field(ui, "Defer date", &mut buf.defer_date, false);
         dirty |= recurrence_field(ui, &mut buf.recurrence, &mut buf.due_date);
+        dirty |= estimate_field(ui, &mut buf.estimated_minutes);
 
         let mut completed = buf.completed;
         if ui.checkbox(&mut completed, "Completed").changed() {

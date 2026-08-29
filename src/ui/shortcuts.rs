@@ -16,6 +16,7 @@ pub fn handle(ctx: &egui::Context, state: &mut AppState) {
     handle_archive_confirm(ctx, state);
     handle_project_picker(ctx, state);
     handle_due_date_picker(ctx, state);
+    handle_estimate_picker(ctx, state);
     handle_sidebar_navigation(ctx, state);
     handle_focus_sidebar(ctx, state);
     handle_task_navigation(ctx, state);
@@ -329,6 +330,44 @@ fn handle_due_date_picker(ctx: &egui::Context, state: &mut AppState) {
         && state.highlighted_task.is_some()
     {
         state.open_due_date_picker();
+    }
+}
+
+/// `E` opens a keyboard-driven estimate picker for the highlighted task,
+/// with quick presets (15 min, 1 hour, …) plus a free-text field ("90",
+/// "1h30m") parsed locally — no AI involved, unlike the due-date picker.
+/// Same open/navigate/confirm/cancel shape as [`handle_due_date_picker`].
+fn handle_estimate_picker(ctx: &egui::Context, state: &mut AppState) {
+    if state.estimate_picker.is_some() {
+        // Escape always bails.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            state.close_estimate_picker();
+            return;
+        }
+        // While the text field has keyboard focus, it owns arrows/Enter (its
+        // own Enter-submit lives in `ui::estimate_picker`).
+        if ctx.memory(|m| m.focused()).is_some() {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
+            state.move_estimate_picker_highlight(1);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
+            state.move_estimate_picker_highlight(-1);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+            state.confirm_estimate_picker();
+        }
+        return;
+    }
+
+    if state.any_picker_open() || ctx.memory(|m| m.focused()).is_some() {
+        return;
+    }
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::E))
+        && state.highlighted_task.is_some()
+    {
+        state.open_estimate_picker();
     }
 }
 

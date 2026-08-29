@@ -149,6 +149,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
         .column(Column::auto()) // complete
         .column(Column::remainder()) // title
         .column(Column::auto().at_least(90.0)) // due date
+        .column(Column::auto().at_least(70.0)) // estimate
         .column(Column::initial(project_col_width)) // project
         .header(28.0, |mut header| {
             header.col(|ui| {
@@ -160,6 +161,11 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
             header.col(|ui| {
                 if sort_header(ui, "Due", TaskSortKey::DueDate, state).clicked() {
                     sort_clicked = Some(TaskSortKey::DueDate);
+                }
+            });
+            header.col(|ui| {
+                if sort_header(ui, "Estimate", TaskSortKey::Estimate, state).clicked() {
+                    sort_clicked = Some(TaskSortKey::Estimate);
                 }
             });
             header.col(|ui| {
@@ -178,6 +184,10 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                 let due = task
                     .due_date
                     .map(|d| d.format("%Y-%m-%d").to_string())
+                    .unwrap_or_default();
+                let estimate = task
+                    .estimated_minutes
+                    .map(crate::ui::format_estimate)
                     .unwrap_or_default();
                 let project = project_name(task.project_id, state);
                 // Keyboard cursor position (Up/Down), separate from whether
@@ -219,6 +229,9 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                         egui::RichText::new(due)
                     };
                     ui.label(text);
+                });
+                row.col(|ui| {
+                    ui.weak(estimate);
                 });
                 row.col(|ui| {
                     ui.weak(project);
