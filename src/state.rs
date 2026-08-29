@@ -95,6 +95,11 @@ pub struct ProjectPickerState {
 pub struct DueDatePickerState {
     pub task_id: TaskId,
     pub highlighted: usize,
+    /// One-shot flag consumed by `ui::due_date_picker::draw` right after it
+    /// adds the text field, so keyboard focus lands there when the picker
+    /// opens (same pattern as `AppState::quick_capture_focus_pending`). Tab
+    /// then hands control to the quick-option list and back.
+    pub focus_pending: bool,
     /// The free-text "type a date" field (e.g. "next friday", "in 3 weeks"),
     /// resolved to a real date by the LLM — see
     /// `AppState::submit_due_date_picker_text`.
@@ -2127,9 +2132,10 @@ impl AppState {
         Ok(())
     }
 
-    /// Opens the keyboard-driven due-date picker for the highlighted task,
-    /// pre-highlighting whichever quick option matches its current due date
-    /// (falling back to "No Due Date" if it doesn't match one exactly).
+    /// Opens the keyboard-driven due-date picker for the highlighted task.
+    /// Keyboard focus lands in the free-text field (Tab moves it to the quick
+    /// options); the option matching the task's current due date is
+    /// pre-highlighted, falling back to "No Due Date" if none matches exactly.
     pub fn open_due_date_picker(&mut self) {
         let Some(task_id) = self.highlighted_task else {
             return;
@@ -2147,6 +2153,7 @@ impl AppState {
         self.due_date_picker = Some(DueDatePickerState {
             task_id,
             highlighted,
+            focus_pending: true,
             text_input: String::new(),
             ai_pending: None,
             ai_error: None,
@@ -2190,8 +2197,8 @@ impl AppState {
         }
         let Some(config) = self.llm_config.clone() else {
             picker.ai_error = Some(
-                "Typing a date needs an AI provider — set one up in Settings, or pick an \
-                 option above."
+                "Typing a date needs an AI provider — set one up in Settings, or press Tab \
+                 and pick one from the list."
                     .to_string(),
             );
             return;
@@ -3707,6 +3714,18 @@ mod tests {
         let expected = Local::now().date_naive() + Duration::days(1);
         let updated = task_repo::get(&state.conn, task_id).unwrap().unwrap();
         assert_eq!(updated.due_date, Some(expected));
+    }
+
+    #[test]
+    fn open_due_date_picker_asks_the_ui_to_focus_the_text_field() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "renew passport".to_string();
+        state.quick_capture_submit();
+        state.move_highlight(1);
+
+        state.open_due_date_picker();
+
+        assert!(state.due_date_picker.as_ref().unwrap().focus_pending);
     }
 
     #[test]
