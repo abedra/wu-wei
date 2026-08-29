@@ -17,6 +17,7 @@ use crate::llm::{
     self, ChatAction, ChatCalendarEventSummary, ChatCompletedTaskSummary, ChatContext, ChatReply,
     ChatRole, ChatTaskSummary, ChatTurn, LlmConfig, ParsedTask, PromptContext, ProviderKind,
 };
+use crate::schedule::{self, ScheduleRow};
 use crate::sync::{self, SyncSummary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,6 +440,15 @@ pub struct AppState {
     pub conn: Connection,
     pub projects: Vec<Project>,
     pub visible_tasks: Vec<Task>,
+    /// The Today view's auto-ordered schedule: calendar events in
+    /// chronological order with tasks slotted into the gaps between them by
+    /// estimate (see `crate::schedule::plan_today`). Rebuilt by
+    /// `refresh_today_schedule` whenever the tasks, the events, or the sort
+    /// change; empty on every perspective other than Today and whenever
+    /// Google Calendar isn't connected. Its `Task` rows index into
+    /// `visible_tasks`, which `refresh_today_schedule` reorders to match so
+    /// the keyboard cursor still walks the list top to bottom.
+    pub today_schedule: Vec<ScheduleRow>,
     pub perspective: Perspective,
     /// The calendar date `visible_tasks` was last computed against — not
     /// user-facing state, just how `refresh_if_date_changed` notices the
@@ -596,6 +606,7 @@ impl AppState {
             conn,
             projects: Vec::new(),
             visible_tasks: Vec::new(),
+            today_schedule: Vec::new(),
             perspective: Perspective::Inbox,
             last_seen_date: Local::now().date_naive(),
             sort_key: TaskSortKey::default(),
@@ -746,11 +757,58 @@ impl AppState {
         };
         self.visible_tasks = self.unwrap_or_report(result, Vec::new());
         self.sort_visible_tasks();
+        self.refresh_today_schedule();
         if let Some(id) = self.highlighted_task
             && !self.visible_tasks.iter().any(|t| t.id == id)
         {
             self.highlighted_task = None;
         }
+    }
+
+    /// Rebuilds `today_schedule` from the current `calendar_events` and
+    /// `visible_tasks`, and reorders `visible_tasks` to match the schedule
+    /// so the keyboard cursor walks the same top-to-bottom order the Today
+    /// view shows. A no-op that just clears the schedule on any other
+    /// perspective, or when Google Calendar isn't connected (there are no
+    /// events to slot tasks around, so the plain task table is used instead
+    /// — see `ui::task_list`).
+    fn refresh_today_schedule(&mut self) {
+        if self.perspective != Perspective::Today || self.google_calendar_config.is_none() {
+            self.today_schedule.clear();
+            return;
+        }
+
+        let rows = schedule::plan_today(&self.calendar_events, &self.visible_tasks, Local::now());
+
+        // Pull the tasks into schedule order, then renumber each `Task` row
+        // to its new index so the rows still line up with `visible_tasks`.
+        let task_order: Vec<usize> = rows
+            .iter()
+            .filter_map(|row| match row {
+                ScheduleRow::Task { index, .. } => Some(*index),
+                ScheduleRow::Event { .. } => None,
+            })
+            .collect();
+        self.visible_tasks = task_order
+            .iter()
+            .map(|&i| self.visible_tasks[i].clone())
+            .collect();
+
+        let mut next_task = 0;
+        self.today_schedule = rows
+            .into_iter()
+            .map(|row| match row {
+                ScheduleRow::Task { start, .. } => {
+                    let row = ScheduleRow::Task {
+                        index: next_task,
+                        start,
+                    };
+                    next_task += 1;
+                    row
+                }
+                event => event,
+            })
+            .collect();
     }
 
     /// Picks `key` as the sort applied on top of the current perspective
@@ -772,6 +830,7 @@ impl AppState {
             };
         }
         self.sort_visible_tasks();
+        self.refresh_today_schedule();
     }
 
     /// Re-sorts `visible_tasks` in place per `sort_key`/`sort_direction`,
@@ -972,6 +1031,7 @@ impl AppState {
                 self.calendar_events = events;
                 self.calendar_status = None;
                 self.last_calendar_sync = Some(Utc::now());
+                self.refresh_today_schedule();
             }
             Ok(Err(e)) => {
                 self.calendar_pending = None;
@@ -1101,6 +1161,7 @@ impl AppState {
         }
         self.google_calendar_config = None;
         self.calendar_events.clear();
+        self.today_schedule.clear();
         self.calendar_status = None;
         self.google_auth_status = None;
         if let Some(draft) = &mut self.settings {
@@ -2365,8 +2426,10 @@ impl AppState {
                 self.set_task_estimate(task_id, Some(minutes));
             }
             None => {
-                picker.error =
-                    Some("Couldn't read an estimate from that — try \"90\", \"45m\", \"1h30m\".".to_string());
+                picker.error = Some(
+                    "Couldn't read an estimate from that — try \"90\", \"45m\", \"1h30m\"."
+                        .to_string(),
+                );
             }
         }
     }
@@ -4478,13 +4541,21 @@ mod tests {
 
         state.set_sort(TaskSortKey::Estimate);
         assert_eq!(state.sort_direction, SortDirection::Ascending);
-        let titles: Vec<&str> = state.visible_tasks.iter().map(|t| t.title.as_str()).collect();
+        let titles: Vec<&str> = state
+            .visible_tasks
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
         assert_eq!(titles, ["quick", "long", "no estimate"]);
 
         // Flip to descending, undated task still last.
         state.set_sort(TaskSortKey::Estimate);
         assert_eq!(state.sort_direction, SortDirection::Descending);
-        let titles: Vec<&str> = state.visible_tasks.iter().map(|t| t.title.as_str()).collect();
+        let titles: Vec<&str> = state
+            .visible_tasks
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
         assert_eq!(titles, ["long", "quick", "no estimate"]);
     }
 
@@ -4569,5 +4640,114 @@ mod tests {
             .map(|t| t.title.as_str())
             .collect();
         assert_eq!(titles, ["due today", "no due date"]);
+    }
+
+    /// Builds a task due today with the given estimate, via the same edit
+    /// path the UI uses.
+    fn add_today_task(state: &mut AppState, title: &str, estimate: Option<i64>) -> TaskId {
+        let today = Local::now().date_naive();
+        state.quick_entry_buffer = title.to_string();
+        state.quick_capture_submit();
+        let id = state
+            .visible_tasks
+            .iter()
+            .find(|t| t.title == title)
+            .unwrap()
+            .id;
+        state.select_task(id);
+        {
+            let buf = state.task_edit_buffer.as_mut().unwrap();
+            buf.due_date = Some(today);
+            buf.estimated_minutes = estimate;
+        }
+        state.save_task_edits();
+        id
+    }
+
+    fn fake_calendar_config() -> GoogleCalendarConfig {
+        GoogleCalendarConfig {
+            client_id: "id".to_string(),
+            client_secret: "secret".to_string(),
+            refresh_token: "refresh".to_string(),
+            access_token: "access".to_string(),
+            expiry: Utc::now() + Duration::hours(1),
+        }
+    }
+
+    fn timed_event(title: &str, start_hour: u32, end_hour: u32) -> CalendarEvent {
+        let day = Local::now().date_naive();
+        let at = |h: u32| {
+            day.and_hms_opt(h, 0, 0)
+                .unwrap()
+                .and_local_timezone(Local)
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        CalendarEvent {
+            id: Uuid::new_v4().to_string(),
+            title: title.to_string(),
+            start: at(start_hour),
+            end: at(end_hour),
+            all_day: false,
+            location: None,
+        }
+    }
+
+    #[test]
+    fn today_schedule_interleaves_events_and_tasks_and_reorders_visible_tasks() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.google_calendar_config = Some(fake_calendar_config());
+
+        // A far-future event so "now" always sits before it, plus a task
+        // that fits the gap and one with no estimate.
+        add_today_task(&mut state, "estimated task", Some(15));
+        add_today_task(&mut state, "no estimate task", None);
+
+        state.set_perspective(Perspective::Today);
+        state.calendar_events = vec![timed_event("Evening call", 23, 23)];
+        state.refresh_today_schedule();
+
+        // Events stay put; the estimated task slots in ahead of the
+        // unestimated one, which sinks to the bottom.
+        let kinds: Vec<&str> = state
+            .today_schedule
+            .iter()
+            .map(|row| match row {
+                ScheduleRow::Event { .. } => "event",
+                ScheduleRow::Task { .. } => "task",
+            })
+            .collect();
+        assert_eq!(kinds, ["task", "event", "task"]);
+
+        // `visible_tasks` is reordered to match the schedule, and each
+        // `Task` row indexes into it.
+        let scheduled_titles: Vec<&str> = state
+            .today_schedule
+            .iter()
+            .filter_map(|row| match row {
+                ScheduleRow::Task { index, .. } => Some(state.visible_tasks[*index].title.as_str()),
+                ScheduleRow::Event { .. } => None,
+            })
+            .collect();
+        assert_eq!(scheduled_titles, ["estimated task", "no estimate task"]);
+        assert!(matches!(
+            state.today_schedule[2],
+            ScheduleRow::Task { start: None, .. }
+        ));
+    }
+
+    #[test]
+    fn today_schedule_is_empty_off_today_or_without_a_calendar() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        add_today_task(&mut state, "a task", Some(15));
+
+        // On Today but no calendar connected: no schedule.
+        state.set_perspective(Perspective::Today);
+        assert!(state.today_schedule.is_empty());
+
+        // Calendar connected but a different perspective: still no schedule.
+        state.google_calendar_config = Some(fake_calendar_config());
+        state.set_perspective(Perspective::Review);
+        assert!(state.today_schedule.is_empty());
     }
 }

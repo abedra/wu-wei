@@ -11,6 +11,7 @@ mod db_bootstrap;
 mod desktop_install;
 mod domain;
 mod llm;
+mod schedule;
 mod state;
 mod sync;
 mod ui;
