@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at          TEXT,       -- stamped by task_repo::create/update; used by sync to break edit conflicts
     estimated_minutes   INTEGER,
     recurrence_interval INTEGER,
-    recurrence_unit     TEXT        -- 'days' | 'weeks' | 'months'; NULL = not recurring
+    recurrence_unit     TEXT,       -- 'days' | 'weeks' | 'months'; NULL = not recurring
+    recurrence_weekday_mask INTEGER -- Mon-first weekday bitmask (bit 0 = Mon); NULL = repeat lands on any day. Restricts which days a repeat can fall on, e.g. weekdays-only.
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id);

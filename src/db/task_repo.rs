@@ -5,7 +5,16 @@ use uuid::Uuid;
 use super::error::{DbError, DbResult};
 use super::sync_repo;
 use crate::domain::project::ProjectId;
-use crate::domain::task::{Recurrence, RecurrenceUnit, Task, TaskId};
+use crate::domain::task::{Recurrence, RecurrenceUnit, Task, TaskId, WeekdaySet};
+
+/// The `recurrence_weekday_mask` column value for a task: the weekday
+/// restriction's bitmask, or `NULL` when the task doesn't repeat or repeats
+/// on any day.
+fn weekday_mask(task: &Task) -> Option<u8> {
+    task.recurrence
+        .and_then(|r| r.weekdays)
+        .map(|w| w.to_mask())
+}
 
 /// Stamps `updated_at` to now, ignoring whatever's on `task` for that
 /// column — see the field's doc comment on `domain::task::Task`.
@@ -13,8 +22,9 @@ pub fn create(conn: &Connection, task: &Task) -> DbResult<()> {
     conn.execute(
         "INSERT INTO tasks (id, title, notes, project_id, due_date, defer_date,
                              completed, completed_at, created_at, updated_at,
-                             estimated_minutes, recurrence_interval, recurrence_unit)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                             estimated_minutes, recurrence_interval, recurrence_unit,
+                             recurrence_weekday_mask)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             task.id.0.to_string(),
             task.title,
@@ -29,6 +39,7 @@ pub fn create(conn: &Connection, task: &Task) -> DbResult<()> {
             task.estimated_minutes,
             task.recurrence.map(|r| r.interval),
             task.recurrence.map(|r| r.unit.as_str()),
+            weekday_mask(task),
         ],
     )?;
     Ok(())
@@ -40,7 +51,8 @@ pub fn update(conn: &Connection, task: &Task) -> DbResult<()> {
         "UPDATE tasks SET title = ?2, notes = ?3, project_id = ?4, due_date = ?5,
                            defer_date = ?6, completed = ?7,
                            completed_at = ?8, updated_at = ?9, estimated_minutes = ?10,
-                           recurrence_interval = ?11, recurrence_unit = ?12
+                           recurrence_interval = ?11, recurrence_unit = ?12,
+                           recurrence_weekday_mask = ?13
          WHERE id = ?1",
         params![
             task.id.0.to_string(),
@@ -55,6 +67,7 @@ pub fn update(conn: &Connection, task: &Task) -> DbResult<()> {
             task.estimated_minutes,
             task.recurrence.map(|r| r.interval),
             task.recurrence.map(|r| r.unit.as_str()),
+            weekday_mask(task),
         ],
     )?;
     Ok(())
@@ -100,8 +113,9 @@ pub fn upsert_synced(conn: &Connection, task: &Task) -> DbResult<()> {
     conn.execute(
         "INSERT INTO tasks (id, title, notes, project_id, due_date, defer_date,
                              completed, completed_at, created_at, updated_at,
-                             estimated_minutes, recurrence_interval, recurrence_unit)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                             estimated_minutes, recurrence_interval, recurrence_unit,
+                             recurrence_weekday_mask)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(id) DO UPDATE SET
              title = excluded.title, notes = excluded.notes,
              project_id = excluded.project_id, due_date = excluded.due_date,
@@ -109,7 +123,8 @@ pub fn upsert_synced(conn: &Connection, task: &Task) -> DbResult<()> {
              completed_at = excluded.completed_at, updated_at = excluded.updated_at,
              estimated_minutes = excluded.estimated_minutes,
              recurrence_interval = excluded.recurrence_interval,
-             recurrence_unit = excluded.recurrence_unit",
+             recurrence_unit = excluded.recurrence_unit,
+             recurrence_weekday_mask = excluded.recurrence_weekday_mask",
         params![
             task.id.0.to_string(),
             task.title,
@@ -124,6 +139,7 @@ pub fn upsert_synced(conn: &Connection, task: &Task) -> DbResult<()> {
             task.estimated_minutes,
             task.recurrence.map(|r| r.interval),
             task.recurrence.map(|r| r.unit.as_str()),
+            weekday_mask(task),
         ],
     )?;
     Ok(())
@@ -144,7 +160,8 @@ pub fn get(conn: &Connection, id: TaskId) -> DbResult<Option<Task>> {
     conn.query_row(
         "SELECT id, title, notes, project_id, due_date, defer_date,
                 completed, completed_at, created_at, updated_at,
-                estimated_minutes, recurrence_interval, recurrence_unit
+                estimated_minutes, recurrence_interval, recurrence_unit,
+                recurrence_weekday_mask
          FROM tasks WHERE id = ?1",
         params![id.0.to_string()],
         row_to_task,
@@ -242,7 +259,11 @@ pub fn set_due_date(conn: &Connection, id: TaskId, due_date: Option<NaiveDate>) 
 pub fn set_project(conn: &Connection, id: TaskId, project_id: Option<ProjectId>) -> DbResult<()> {
     conn.execute(
         "UPDATE tasks SET project_id = ?2, updated_at = ?3 WHERE id = ?1",
-        params![id.0.to_string(), project_id.map(|p| p.0.to_string()), Utc::now()],
+        params![
+            id.0.to_string(),
+            project_id.map(|p| p.0.to_string()),
+            Utc::now()
+        ],
     )?;
     Ok(())
 }
@@ -254,11 +275,14 @@ pub fn set_recurrence(
     recurrence: Option<Recurrence>,
 ) -> DbResult<()> {
     conn.execute(
-        "UPDATE tasks SET recurrence_interval = ?2, recurrence_unit = ?3, updated_at = ?4 WHERE id = ?1",
+        "UPDATE tasks SET recurrence_interval = ?2, recurrence_unit = ?3,
+                          recurrence_weekday_mask = ?4, updated_at = ?5
+         WHERE id = ?1",
         params![
             id.0.to_string(),
             recurrence.map(|r| r.interval),
             recurrence.map(|r| r.unit.as_str()),
+            recurrence.and_then(|r| r.weekdays).map(|w| w.to_mask()),
             Utc::now(),
         ],
     )?;
@@ -280,7 +304,8 @@ fn list_where(
     let sql = format!(
         "SELECT id, title, notes, project_id, due_date, defer_date,
                 completed, completed_at, created_at, updated_at,
-                estimated_minutes, recurrence_interval, recurrence_unit
+                estimated_minutes, recurrence_interval, recurrence_unit,
+                recurrence_weekday_mask
          FROM tasks WHERE {where_clause} ORDER BY {order_by}"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -300,12 +325,16 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     let updated_at: Option<chrono::DateTime<Utc>> = row.get(9)?;
     let recurrence_interval: Option<u32> = row.get(11)?;
     let recurrence_unit: Option<String> = row.get(12)?;
+    let recurrence_weekday_mask: Option<u8> = row.get(13)?;
     let recurrence = recurrence_interval
         .zip(recurrence_unit)
-        .map(|(interval, unit)| Recurrence {
-            interval,
-            unit: RecurrenceUnit::parse(&unit)
-                .expect("recurrence_unit column always holds a value written by this module"),
+        .map(|(interval, unit)| {
+            let unit = RecurrenceUnit::parse(&unit)
+                .expect("recurrence_unit column always holds a value written by this module");
+            // `with_weekdays` also normalizes a stale full/empty mask back to
+            // "no restriction".
+            Recurrence::every(interval, unit)
+                .with_weekdays(recurrence_weekday_mask.map(WeekdaySet::from_mask))
         });
     Ok(Task {
         id: TaskId(
@@ -391,14 +420,7 @@ mod tests {
             &|c: &Connection, id: TaskId| set_due_date(c, id, Some(Utc::now().date_naive())),
             &|c: &Connection, id: TaskId| set_project(c, id, Some(project.id)),
             &|c: &Connection, id: TaskId| {
-                set_recurrence(
-                    c,
-                    id,
-                    Some(Recurrence {
-                        interval: 1,
-                        unit: RecurrenceUnit::Weeks,
-                    }),
-                )
+                set_recurrence(c, id, Some(Recurrence::every(1, RecurrenceUnit::Weeks)))
             },
         ] as [&dyn Fn(&Connection, TaskId) -> DbResult<()>; 4]
         {
@@ -569,10 +591,7 @@ mod tests {
         let mut recurring = Task::new_inbox("took out the trash");
         recurring.completed = true;
         recurring.completed_at = Some(now - Duration::days(1));
-        recurring.recurrence = Some(Recurrence {
-            interval: 1,
-            unit: RecurrenceUnit::Weeks,
-        });
+        recurring.recurrence = Some(Recurrence::every(1, RecurrenceUnit::Weeks));
         create(&conn, &recurring).unwrap();
 
         let still_open = Task::new_inbox("not done yet");
@@ -587,24 +606,62 @@ mod tests {
     fn recurrence_round_trips_through_create_get_and_update() {
         let conn = db::open_in_memory().unwrap();
         let mut task = Task::new_inbox("water plants");
-        task.recurrence = Some(Recurrence {
-            interval: 3,
-            unit: RecurrenceUnit::Days,
-        });
+        task.recurrence = Some(Recurrence::every(3, RecurrenceUnit::Days));
         create(&conn, &task).unwrap();
 
         let fetched = get(&conn, task.id).unwrap().unwrap();
         assert_eq!(
             fetched.recurrence,
-            Some(Recurrence {
-                interval: 3,
-                unit: RecurrenceUnit::Days,
-            })
+            Some(Recurrence::every(3, RecurrenceUnit::Days))
         );
 
         task.recurrence = None;
         update(&conn, &task).unwrap();
         let fetched = get(&conn, task.id).unwrap().unwrap();
         assert!(fetched.recurrence.is_none());
+    }
+
+    #[test]
+    fn recurrence_weekday_restriction_round_trips() {
+        use crate::domain::task::WeekdaySet;
+        let conn = db::open_in_memory().unwrap();
+
+        let mut task = Task::new_inbox("standup");
+        task.recurrence = Some(
+            Recurrence::every(1, RecurrenceUnit::Days).with_weekdays(Some(WeekdaySet::WEEKDAYS)),
+        );
+        create(&conn, &task).unwrap();
+        assert_eq!(
+            get(&conn, task.id).unwrap().unwrap().recurrence,
+            Some(
+                Recurrence::every(1, RecurrenceUnit::Days)
+                    .with_weekdays(Some(WeekdaySet::WEEKDAYS))
+            )
+        );
+
+        // Clearing the restriction via update nulls the column.
+        task.recurrence = Some(Recurrence::every(1, RecurrenceUnit::Days));
+        update(&conn, &task).unwrap();
+        assert_eq!(
+            get(&conn, task.id).unwrap().unwrap().recurrence,
+            Some(Recurrence::every(1, RecurrenceUnit::Days))
+        );
+
+        // A full-week mask that somehow reached the column reads back as "no
+        // restriction".
+        conn.execute(
+            "UPDATE tasks SET recurrence_weekday_mask = 127 WHERE id = ?1",
+            params![task.id.0.to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            get(&conn, task.id)
+                .unwrap()
+                .unwrap()
+                .recurrence
+                .unwrap()
+                .weekdays,
+            None
+        );
     }
 }

@@ -55,6 +55,12 @@ fn migrate(conn: &Connection) -> DbResult<()> {
     if !has_column("tasks", "recurrence_unit")? {
         conn.execute("ALTER TABLE tasks ADD COLUMN recurrence_unit TEXT", [])?;
     }
+    if !has_column("tasks", "recurrence_weekday_mask")? {
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN recurrence_weekday_mask INTEGER",
+            [],
+        )?;
+    }
     if !has_column("tasks", "updated_at")? {
         conn.execute("ALTER TABLE tasks ADD COLUMN updated_at TEXT", [])?;
         conn.execute(

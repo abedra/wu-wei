@@ -6,7 +6,7 @@ use super::{
     ChatAction, ChatCalendarEventSummary, ChatCompletedTaskSummary, ChatContext, ChatReply,
     ParsedTask, PromptContext,
 };
-use crate::domain::task::{Recurrence, RecurrenceUnit, TaskId};
+use crate::domain::task::{Recurrence, RecurrenceUnit, TaskId, WeekdaySet};
 
 /// A precomputed weekday→date lookup for today plus the next 6 days, handed
 /// to the model alongside "today's date" so resolving something like "due
@@ -89,10 +89,18 @@ pub fn system_prompt(context: &PromptContext) -> String {
          against the lookup above, else null; a project name copied exactly from the \
          existing projects list if one is clearly implied, else null — never invent a \
          new project name; recurrence as \
-         {{interval, unit}} if the text implies \
-         the task repeats — \"daily\"/\"every day\" -> {{interval:1, unit:\"days\"}}, \
-         \"weekly\" -> {{interval:1, unit:\"weeks\"}}, \"every 3 days\" -> {{interval:3, \
-         unit:\"days\"}}, \"monthly\" -> {{interval:1, unit:\"months\"}} — else null.",
+         {{interval, unit, weekdays}} if the text implies \
+         the task repeats — \"daily\"/\"every day\" -> {{interval:1, unit:\"days\", \
+         weekdays:null}}, \
+         \"weekly\" -> {{interval:1, unit:\"weeks\", weekdays:null}}, \"every 3 days\" -> \
+         {{interval:3, unit:\"days\", weekdays:null}}, \"monthly\" -> {{interval:1, \
+         unit:\"months\", weekdays:null}} — else null. `weekdays` restricts which days the \
+         repeat may land on (an occurrence computed onto an excluded day rolls forward to \
+         the next allowed one): \"every weekday\"/\"on weekdays\" -> {{interval:1, \
+         unit:\"days\", weekdays:[\"mon\",\"tue\",\"wed\",\"thu\",\"fri\"]}}, \"every \
+         weekend day\" -> weekdays:[\"sat\",\"sun\"], \"every Monday, Wednesday and \
+         Friday\" -> {{interval:1, unit:\"weeks\", weekdays:[\"mon\",\"wed\",\"fri\"]}}. \
+         Use weekdays:null whenever no day restriction is implied.",
         today = context.today.format("%Y-%m-%d"),
         today_weekday = context.today.format("%A"),
         weekdays = weekday_reference(context.today),
@@ -156,7 +164,7 @@ impl RawDueDate {
 
 /// The `recurrence` field's JSON Schema — shared between `response_schema`
 /// (quick capture) and `chat_response_schema` (create_task), since both
-/// accept the same `{interval, unit}` shape.
+/// accept the same `{interval, unit, weekdays}` shape.
 fn recurrence_schema() -> Value {
     json!({
         "anyOf": [
@@ -164,9 +172,21 @@ fn recurrence_schema() -> Value {
                 "type": "object",
                 "properties": {
                     "interval": { "type": "integer" },
-                    "unit": { "type": "string", "enum": ["days", "weeks", "months"] }
+                    "unit": { "type": "string", "enum": ["days", "weeks", "months"] },
+                    "weekdays": {
+                        "anyOf": [
+                            {
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+                                }
+                            },
+                            { "type": "null" }
+                        ]
+                    }
                 },
-                "required": ["interval", "unit"],
+                "required": ["interval", "unit", "weekdays"],
                 "additionalProperties": false
             },
             { "type": "null" }
@@ -196,6 +216,41 @@ pub fn response_schema() -> Value {
 pub struct RawRecurrence {
     pub interval: u32,
     pub unit: String,
+    /// Weekday names ("mon".."sun" or full names) the repeat is restricted
+    /// to — e.g. `["mon","tue","wed","thu","fri"]` for "every weekday".
+    /// Absent / null / a full or empty set all mean "any day".
+    #[serde(default)]
+    pub weekdays: Option<Vec<String>>,
+}
+
+/// Parses a weekday name the model might emit — "mon", "monday", "Tue", … —
+/// into a `chrono::Weekday`.
+fn parse_weekday(s: &str) -> Option<chrono::Weekday> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "mon" | "monday" => Some(chrono::Weekday::Mon),
+        "tue" | "tues" | "tuesday" => Some(chrono::Weekday::Tue),
+        "wed" | "weds" | "wednesday" => Some(chrono::Weekday::Wed),
+        "thu" | "thur" | "thurs" | "thursday" => Some(chrono::Weekday::Thu),
+        "fri" | "friday" => Some(chrono::Weekday::Fri),
+        "sat" | "saturday" => Some(chrono::Weekday::Sat),
+        "sun" | "sunday" => Some(chrono::Weekday::Sun),
+        _ => None,
+    }
+}
+
+fn parse_optional_weekdays(raw: Option<Vec<String>>) -> Result<Option<WeekdaySet>, String> {
+    let Some(names) = raw.filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let mut days = Vec::new();
+    for name in &names {
+        days.push(
+            parse_weekday(name)
+                .ok_or_else(|| format!("model returned an unknown weekday {name:?}"))?,
+        );
+    }
+    // `Recurrence::with_weekdays` folds a full set back to `None`.
+    Ok(Some(WeekdaySet::from_days(days)))
 }
 
 fn parse_optional_due_date(raw: Option<String>) -> Result<Option<NaiveDate>, String> {
@@ -215,10 +270,10 @@ fn parse_optional_recurrence(raw: Option<RawRecurrence>) -> Result<Option<Recurr
             }
             let unit = RecurrenceUnit::parse(&r.unit)
                 .ok_or_else(|| format!("model returned an unknown recurrence unit {:?}", r.unit))?;
-            Ok(Some(Recurrence {
-                interval: r.interval,
-                unit,
-            }))
+            let weekdays = parse_optional_weekdays(r.weekdays)?;
+            Ok(Some(
+                Recurrence::every(r.interval, unit).with_weekdays(weekdays),
+            ))
         }
         None => Ok(None),
     }
@@ -348,13 +403,19 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
          \"Applied\", or \"I've moved...\" — those describe a change that, from where you \
          stand, hasn't happened.\n\n\
          Recurrence is a real, fully automatic feature of this app — a task with a recurrence \
-         set (interval + unit: days/weeks/months) does not need you or the user to ever \
+         set (interval + unit: days/weeks/months, plus an optional \"weekdays\" list) does \
+         not need you or the user to ever \
          manually create its next occurrence. When that task is completed, the app itself \
          creates the next one, due `interval` `unit` after the completion date. Never tell the \
          user recurrence isn't supported or that they need to create future instances by hand \
          — that's wrong. If the user asks for a recurring/repeating task, set its recurrence \
          (via create_task if it's new, or set_recurrence if it already exists) rather than \
-         just setting one due date.\n\n\
+         just setting one due date. A recurrence's \"weekdays\" (a list drawn from \
+         mon/tue/wed/thu/fri/sat/sun, or null for no restriction) limits which days an \
+         occurrence may fall on — one computed onto an excluded day rolls forward to the \
+         next allowed day. \"every weekday\" is {{interval:1, unit:\"days\", weekdays:\
+         [\"mon\",\"tue\",\"wed\",\"thu\",\"fri\"]}}; \"every Tuesday and Thursday\" is \
+         {{interval:1, unit:\"weeks\", weekdays:[\"tue\",\"thu\"]}}.\n\n\
          Respond with a short, conversational reply for the user, plus a list of actions to \
          perform. Each action has a \"type\" of one of: set_due_date (task_id, due_date as \
          YYYY-MM-DD, resolving relative dates like \"today\"/\"tomorrow\" against today), \
@@ -362,8 +423,9 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
          that date in a single action; the app works out which tasks those are itself. Use \
          this, not a per-task set_due_date, for any \"roll/move/push all my overdue tasks to \
          X\" command — leave task_id null), \
-         clear_due_date (task_id), set_recurrence (task_id, recurrence — {{interval, unit}}; \
-         makes an existing task repeat, or changes how often it already does), \
+         clear_due_date (task_id), set_recurrence (task_id, recurrence — {{interval, unit, \
+         weekdays}}; makes an existing task repeat, or changes how often it already does — \
+         set weekdays for \"every weekday\" and similar, else null), \
          clear_recurrence (task_id — makes an existing task stop repeating; it still keeps \
          whatever due date it has), complete_task (task_id), reopen_task (task_id), \
          move_to_project (task_id, project — copied exactly \
@@ -767,14 +829,12 @@ mod tests {
         raw.recurrence = Some(RawRecurrence {
             interval: 1,
             unit: "days".to_string(),
+            weekdays: None,
         });
         let parsed = raw.into_parsed_task().unwrap();
         assert_eq!(
             parsed.recurrence,
-            Some(Recurrence {
-                interval: 1,
-                unit: RecurrenceUnit::Days,
-            })
+            Some(Recurrence::every(1, RecurrenceUnit::Days))
         );
     }
 
@@ -784,6 +844,7 @@ mod tests {
         raw.recurrence = Some(RawRecurrence {
             interval: 0,
             unit: "days".to_string(),
+            weekdays: None,
         });
         let err = raw.into_parsed_task().unwrap_err();
         assert!(err.contains("interval of 0"));
@@ -795,9 +856,73 @@ mod tests {
         raw.recurrence = Some(RawRecurrence {
             interval: 1,
             unit: "fortnights".to_string(),
+            weekdays: None,
         });
         let err = raw.into_parsed_task().unwrap_err();
         assert!(err.contains("unknown recurrence unit"));
+    }
+
+    #[test]
+    fn parses_every_weekday_recurrence() {
+        let mut raw = extraction("gym", None, None);
+        raw.recurrence = Some(RawRecurrence {
+            interval: 1,
+            unit: "days".to_string(),
+            weekdays: Some(vec![
+                "mon".into(),
+                "Tuesday".into(),
+                "wed".into(),
+                "thu".into(),
+                "fri".into(),
+            ]),
+        });
+        let parsed = raw.into_parsed_task().unwrap();
+        assert_eq!(
+            parsed.recurrence,
+            Some(
+                Recurrence::every(1, RecurrenceUnit::Days)
+                    .with_weekdays(Some(WeekdaySet::WEEKDAYS))
+            )
+        );
+    }
+
+    #[test]
+    fn a_full_weekday_list_is_treated_as_no_restriction() {
+        let mut raw = extraction("gym", None, None);
+        raw.recurrence = Some(RawRecurrence {
+            interval: 1,
+            unit: "days".to_string(),
+            weekdays: Some(vec![
+                "mon".into(),
+                "tue".into(),
+                "wed".into(),
+                "thu".into(),
+                "fri".into(),
+                "sat".into(),
+                "sun".into(),
+            ]),
+        });
+        let parsed = raw.into_parsed_task().unwrap();
+        assert_eq!(parsed.recurrence.unwrap().weekdays, None);
+    }
+
+    #[test]
+    fn rejects_an_unknown_weekday_name() {
+        let mut raw = extraction("gym", None, None);
+        raw.recurrence = Some(RawRecurrence {
+            interval: 1,
+            unit: "weeks".to_string(),
+            weekdays: Some(vec!["mon".into(), "funday".into()]),
+        });
+        let err = raw.into_parsed_task().unwrap_err();
+        assert!(err.contains("unknown weekday"));
+    }
+
+    #[test]
+    fn recurrence_schema_requires_the_weekdays_field() {
+        let schema = recurrence_schema();
+        let required = schema["anyOf"][0]["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "weekdays"));
     }
 
     fn chat_action(kind: &str, task_id: &str) -> RawChatAction {
@@ -1115,16 +1240,14 @@ mod tests {
         raw.recurrence = Some(RawRecurrence {
             interval: 2,
             unit: "weeks".to_string(),
+            weekdays: None,
         });
         let action = raw.into_chat_action().unwrap();
         assert_eq!(
             action,
             ChatAction::SetRecurrence {
                 task_id: id,
-                recurrence: Recurrence {
-                    interval: 2,
-                    unit: RecurrenceUnit::Weeks,
-                },
+                recurrence: Recurrence::every(2, RecurrenceUnit::Weeks),
             }
         );
     }
@@ -1156,6 +1279,7 @@ mod tests {
         raw.recurrence = Some(RawRecurrence {
             interval: 1,
             unit: "weeks".to_string(),
+            weekdays: None,
         });
         let action = raw.into_chat_action().unwrap();
         assert_eq!(
@@ -1165,10 +1289,7 @@ mod tests {
                     title: "Review Rocket Money".to_string(),
                     due_date: Some(NaiveDate::from_ymd_opt(2026, 8, 24).unwrap()),
                     project: Some("Habits".to_string()),
-                    recurrence: Some(Recurrence {
-                        interval: 1,
-                        unit: RecurrenceUnit::Weeks,
-                    }),
+                    recurrence: Some(Recurrence::every(1, RecurrenceUnit::Weeks)),
                 },
             }
         );

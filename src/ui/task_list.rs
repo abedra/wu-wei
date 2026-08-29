@@ -203,7 +203,12 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                     if completed {
                         text = text.strikethrough().weak();
                     }
-                    if ui.selectable_label(is_open, text).clicked() {
+                    let label = ui.selectable_label(is_open, text);
+                    let label = match &task.recurrence {
+                        Some(r) => label.on_hover_text(format!("Repeats {}", r.describe())),
+                        None => label,
+                    };
+                    if label.clicked() {
                         to_select = Some(task_id);
                     }
                 });

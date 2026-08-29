@@ -1,9 +1,59 @@
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, NaiveDate, Weekday};
 use eframe::egui;
 use egui_extras::DatePickerButton;
 
-use crate::domain::task::{Recurrence, RecurrenceUnit};
+use crate::domain::task::{ALL_WEEKDAYS, Recurrence, RecurrenceUnit, WeekdaySet};
 use crate::state::AppState;
+
+fn weekday_abbrev(day: Weekday) -> &'static str {
+    match day {
+        Weekday::Mon => "Mo",
+        Weekday::Tue => "Tu",
+        Weekday::Wed => "We",
+        Weekday::Thu => "Th",
+        Weekday::Fri => "Fr",
+        Weekday::Sat => "Sa",
+        Weekday::Sun => "Su",
+    }
+}
+
+/// The "only on these weekdays" row, shown under "Repeats every". A repeat
+/// with every day selected is the same as no restriction, so that state is
+/// stored as `weekdays: None` (via `Recurrence::with_weekdays`). Clicking
+/// the last remaining day back off is ignored — a repeat has to be allowed
+/// to land somewhere.
+fn recurrence_weekday_row(ui: &mut egui::Ui, r: &mut Recurrence) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("On");
+        let current = r
+            .weekdays
+            .unwrap_or_else(|| WeekdaySet::from_days(ALL_WEEKDAYS));
+        for day in ALL_WEEKDAYS {
+            let selected = current.contains(day);
+            if ui
+                .selectable_label(selected, weekday_abbrev(day))
+                .on_hover_text(day.to_string())
+                .clicked()
+            {
+                let next = current.with(day, !selected);
+                if !next.is_empty() {
+                    *r = r.with_weekdays(Some(next));
+                    changed = true;
+                }
+            }
+        }
+        if ui
+            .small_button("Weekdays")
+            .on_hover_text("Monday–Friday only")
+            .clicked()
+        {
+            *r = r.with_weekdays(Some(WeekdaySet::WEEKDAYS));
+            changed = true;
+        }
+    });
+    changed
+}
 
 fn naive_to_jiff(d: NaiveDate) -> jiff::civil::Date {
     jiff::civil::Date::new(d.year() as i16, d.month() as i8, d.day() as i8)
@@ -32,10 +82,7 @@ fn recurrence_field(
                 if due_date.is_none() {
                     *due_date = Some(chrono::Local::now().date_naive());
                 }
-                Some(Recurrence {
-                    interval: 1,
-                    unit: RecurrenceUnit::Weeks,
-                })
+                Some(Recurrence::every(1, RecurrenceUnit::Weeks))
             } else {
                 None
             };
@@ -72,6 +119,9 @@ fn recurrence_field(
                 });
         }
     });
+    if let Some(r) = recurrence {
+        changed |= recurrence_weekday_row(ui, r);
+    }
     changed
 }
 

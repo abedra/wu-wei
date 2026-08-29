@@ -28,7 +28,7 @@ use uuid::Uuid;
 use crate::db::error::DbResult;
 use crate::db::{project_repo, sync_repo, task_repo};
 use crate::domain::project::{Project, ProjectId, ProjectKind, ProjectStatus};
-use crate::domain::task::{Recurrence, RecurrenceUnit, Task, TaskId};
+use crate::domain::task::{Recurrence, RecurrenceUnit, Task, TaskId, WeekdaySet};
 
 /// Flat, JSON-serializable mirror of `domain::task::Task` — sync's wire
 /// format doesn't derive serde on the domain type directly, matching how
@@ -49,6 +49,11 @@ pub struct SyncTask {
     pub estimated_minutes: Option<i64>,
     pub recurrence_interval: Option<u32>,
     pub recurrence_unit: Option<String>,
+    /// Mon-first weekday bitmask restricting which days a repeat lands on
+    /// (see `domain::task::WeekdaySet`). `#[serde(default)]` so payloads
+    /// written by an older peer that predates the field still deserialize.
+    #[serde(default)]
+    pub recurrence_weekday_mask: Option<u8>,
 }
 
 impl From<&Task> for SyncTask {
@@ -67,6 +72,7 @@ impl From<&Task> for SyncTask {
             estimated_minutes: t.estimated_minutes,
             recurrence_interval: t.recurrence.map(|r| r.interval),
             recurrence_unit: t.recurrence.map(|r| r.unit.as_str().to_string()),
+            recurrence_weekday_mask: t.recurrence.and_then(|r| r.weekdays).map(|w| w.to_mask()),
         }
     }
 }
@@ -87,7 +93,10 @@ impl SyncTask {
             .recurrence_interval
             .zip(self.recurrence_unit.as_deref())
             .and_then(|(interval, unit)| {
-                RecurrenceUnit::parse(unit).map(|unit| Recurrence { interval, unit })
+                RecurrenceUnit::parse(unit).map(|unit| {
+                    Recurrence::every(interval, unit)
+                        .with_weekdays(self.recurrence_weekday_mask.map(WeekdaySet::from_mask))
+                })
             });
         Some(Task {
             id: TaskId(id),
@@ -415,7 +424,8 @@ fn winning_versions<'a, T: Clone + 'a>(
             .and_modify(|existing| {
                 let item_at = updated_at_of(item);
                 let existing_at = updated_at_of(existing);
-                if item_at > existing_at || (item_at == existing_at && prefer_on_tie(item, existing))
+                if item_at > existing_at
+                    || (item_at == existing_at && prefer_on_tie(item, existing))
                 {
                     *existing = item.clone();
                 }
@@ -493,6 +503,49 @@ mod tests {
     }
 
     #[test]
+    fn sync_task_carries_the_recurrence_weekday_restriction_both_ways() {
+        use crate::domain::task::{Recurrence, RecurrenceUnit, WeekdaySet};
+
+        let mut task = Task::new_inbox("standup");
+        task.recurrence = Some(
+            Recurrence::every(1, RecurrenceUnit::Days).with_weekdays(Some(WeekdaySet::WEEKDAYS)),
+        );
+
+        let wire = SyncTask::from(&task);
+        assert_eq!(
+            wire.recurrence_weekday_mask,
+            Some(WeekdaySet::WEEKDAYS.to_mask())
+        );
+
+        let back = wire.into_task(&HashSet::new()).unwrap();
+        assert_eq!(back.recurrence, task.recurrence);
+    }
+
+    #[test]
+    fn sync_task_from_a_peer_predating_the_weekday_field_still_deserializes() {
+        // No `recurrence_weekday_mask` key — `#[serde(default)]` fills None.
+        let json = r#"{
+            "id": "3d2e1f00-0000-4000-8000-000000000000",
+            "title": "old task", "notes": "", "project_id": null,
+            "due_date": null, "defer_date": null, "completed": false,
+            "completed_at": null,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            "estimated_minutes": null,
+            "recurrence_interval": 1, "recurrence_unit": "weeks"
+        }"#;
+        let wire: SyncTask = serde_json::from_str(json).unwrap();
+        assert_eq!(wire.recurrence_weekday_mask, None);
+        let task = wire.into_task(&HashSet::new()).unwrap();
+        assert_eq!(
+            task.recurrence,
+            Some(crate::domain::task::Recurrence::every(
+                1,
+                crate::domain::task::RecurrenceUnit::Weeks
+            ))
+        );
+    }
+
+    #[test]
     fn disjoint_new_tasks_from_two_devices_merge_to_their_union() {
         let conn = db::open_in_memory().unwrap();
         task_repo::create(&conn, &Task::new_inbox("local task")).unwrap();
@@ -552,7 +605,10 @@ mod tests {
             (done_copy.clone(), open_copy.clone()),
         ] {
             let conn = db::open_in_memory().unwrap();
-            let remotes = [remote_with(vec![first], vec![]), remote_with(vec![second], vec![])];
+            let remotes = [
+                remote_with(vec![first], vec![]),
+                remote_with(vec![second], vec![]),
+            ];
             merge(&conn, &local, &remotes).unwrap();
 
             let fetched = task_repo::get(&conn, task.id).unwrap().unwrap();
@@ -581,7 +637,10 @@ mod tests {
         let remote = remote_with(vec![done_copy], vec![]);
 
         let summary = merge(&conn, &local, std::slice::from_ref(&remote)).unwrap();
-        assert_eq!(summary.tasks_upserted, 1, "heal was skipped as already-current");
+        assert_eq!(
+            summary.tasks_upserted, 1,
+            "heal was skipped as already-current"
+        );
         assert!(task_repo::get(&conn, task.id).unwrap().unwrap().completed);
     }
 

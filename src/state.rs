@@ -10,7 +10,9 @@ use crate::db::error::DbResult;
 use crate::db::{project_repo, settings_repo, task_repo};
 use crate::db_bootstrap;
 use crate::domain::project::{Project, ProjectId, ProjectKind, ProjectStatus};
-use crate::domain::task::{Recurrence, RecurrenceUnit, Task, TaskId};
+#[cfg(test)]
+use crate::domain::task::RecurrenceUnit;
+use crate::domain::task::{Recurrence, Task, TaskId};
 use crate::llm::{
     self, ChatAction, ChatCalendarEventSummary, ChatCompletedTaskSummary, ChatContext, ChatReply,
     ChatRole, ChatTaskSummary, ChatTurn, LlmConfig, ParsedTask, PromptContext, ProviderKind,
@@ -1084,10 +1086,14 @@ impl AppState {
         let mut task = Task::new_inbox(parsed.title);
         // A recurring task with no explicit date still needs one to show up
         // anywhere (Today, the list's Due column, ...), so default it to
-        // today rather than leaving it invisible until edited by hand.
-        task.due_date = parsed
-            .due_date
-            .or_else(|| parsed.recurrence.map(|_| Local::now().date_naive()));
+        // today — snapped forward off a disallowed weekday (e.g. "every
+        // weekday" started on a Saturday) — rather than leaving it invisible
+        // until edited by hand.
+        task.due_date = parsed.due_date.or_else(|| {
+            parsed
+                .recurrence
+                .map(|r| r.snap_to_allowed(Local::now().date_naive()))
+        });
         task.recurrence = parsed.recurrence;
 
         if let Some(name) = parsed.project {
@@ -1196,7 +1202,10 @@ impl AppState {
                 time: if e.all_day {
                     "All day".to_string()
                 } else {
-                    e.start.with_timezone(&Local).format("%-I:%M %p").to_string()
+                    e.start
+                        .with_timezone(&Local)
+                        .format("%-I:%M %p")
+                        .to_string()
                 },
                 location: e.location.clone(),
             })
@@ -1442,14 +1451,9 @@ impl AppState {
                 recurrence,
             } => {
                 let title = self.task_title(*task_id)?;
-                let unit = match recurrence.unit {
-                    RecurrenceUnit::Days => "day(s)",
-                    RecurrenceUnit::Weeks => "week(s)",
-                    RecurrenceUnit::Months => "month(s)",
-                };
                 Ok(format!(
-                    "set \"{title}\" to repeat every {} {unit}",
-                    recurrence.interval
+                    "set \"{title}\" to repeat {}",
+                    recurrence.describe()
                 ))
             }
             ChatAction::ClearRecurrence { task_id } => {
@@ -1558,17 +1562,13 @@ impl AppState {
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| "no task with that id".to_string())?;
                 if task.due_date.is_none() {
-                    task_repo::set_due_date(&self.conn, task_id, Some(Local::now().date_naive()))
+                    let first = recurrence.snap_to_allowed(Local::now().date_naive());
+                    task_repo::set_due_date(&self.conn, task_id, Some(first))
                         .map_err(|e| e.to_string())?;
                 }
-                let unit = match recurrence.unit {
-                    RecurrenceUnit::Days => "day(s)",
-                    RecurrenceUnit::Weeks => "week(s)",
-                    RecurrenceUnit::Months => "month(s)",
-                };
                 Ok(format!(
-                    "set \"{title}\" to repeat every {} {unit}",
-                    recurrence.interval
+                    "set \"{title}\" to repeat {}",
+                    recurrence.describe()
                 ))
             }
             ChatAction::ClearRecurrence { task_id } => {
@@ -1607,10 +1607,13 @@ impl AppState {
             ChatAction::CreateTask { task: parsed } => {
                 let mut task = Task::new_inbox(parsed.title.clone());
                 // Same defaulting as quick capture: a recurring task with no
-                // explicit date still needs one to show up anywhere.
-                task.due_date = parsed
-                    .due_date
-                    .or_else(|| parsed.recurrence.map(|_| Local::now().date_naive()));
+                // explicit date still needs one to show up anywhere, snapped
+                // off a disallowed weekday.
+                task.due_date = parsed.due_date.or_else(|| {
+                    parsed
+                        .recurrence
+                        .map(|r| r.snap_to_allowed(Local::now().date_naive()))
+                });
                 task.recurrence = parsed.recurrence;
                 if let Some(name) = &parsed.project {
                     task.project_id = self
@@ -1962,10 +1965,7 @@ impl AppState {
         };
         let gcal_refresh_minutes = draft
             .gcal_refresh_minutes
-            .clamp(
-                calendar::MIN_REFRESH_MINUTES,
-                calendar::MAX_REFRESH_MINUTES,
-            )
+            .clamp(calendar::MIN_REFRESH_MINUTES, calendar::MAX_REFRESH_MINUTES)
             .to_string();
         let pairs = [
             ("llm_provider", provider),
@@ -2539,10 +2539,7 @@ mod tests {
             title: "inbox zero".to_string(),
             due_date: None,
             project: None,
-            recurrence: Some(Recurrence {
-                interval: 1,
-                unit: RecurrenceUnit::Days,
-            }),
+            recurrence: Some(Recurrence::every(1, RecurrenceUnit::Days)),
         });
 
         assert_eq!(state.visible_tasks.len(), 1);
@@ -2552,11 +2549,35 @@ mod tests {
         );
         assert_eq!(
             state.visible_tasks[0].recurrence,
-            Some(Recurrence {
-                interval: 1,
-                unit: RecurrenceUnit::Days,
-            })
+            Some(Recurrence::every(1, RecurrenceUnit::Days))
         );
+    }
+
+    #[test]
+    fn apply_parsed_task_snaps_an_every_weekday_default_off_the_weekend() {
+        use crate::domain::task::{RecurrenceUnit, WeekdaySet};
+        use chrono::Datelike;
+
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.apply_parsed_task(ParsedTask {
+            title: "daily standup".to_string(),
+            due_date: None,
+            project: None,
+            recurrence: Some(
+                Recurrence::every(1, RecurrenceUnit::Days)
+                    .with_weekdays(Some(WeekdaySet::WEEKDAYS)),
+            ),
+        });
+
+        let due = state.visible_tasks[0].due_date.unwrap();
+        assert!(WeekdaySet::WEEKDAYS.contains(due.weekday()));
+        let today = Local::now().date_naive();
+        // On a weekday the default is still today; on a weekend it moved forward.
+        if WeekdaySet::WEEKDAYS.contains(today.weekday()) {
+            assert_eq!(due, today);
+        } else {
+            assert!(due > today);
+        }
     }
 
     #[test]
@@ -2730,10 +2751,8 @@ mod tests {
         state.quick_capture_submit();
         let task_id = state.visible_tasks[0].id;
         state.select_task(task_id);
-        state.task_edit_buffer.as_mut().unwrap().recurrence = Some(Recurrence {
-            interval: 1,
-            unit: RecurrenceUnit::Days,
-        });
+        state.task_edit_buffer.as_mut().unwrap().recurrence =
+            Some(Recurrence::every(1, RecurrenceUnit::Days));
         state.save_task_edits();
 
         state.receive_chat_reply(ChatReply {
@@ -2789,10 +2808,7 @@ mod tests {
                     title: "Review Rocket Money".to_string(),
                     due_date: Some(due),
                     project: Some("Habits".to_string()),
-                    recurrence: Some(Recurrence {
-                        interval: 1,
-                        unit: RecurrenceUnit::Weeks,
-                    }),
+                    recurrence: Some(Recurrence::every(1, RecurrenceUnit::Weeks)),
                 },
             }],
             parse_failures: Vec::new(),
@@ -2806,10 +2822,7 @@ mod tests {
         assert_eq!(task.due_date, Some(due));
         assert_eq!(
             task.recurrence,
-            Some(Recurrence {
-                interval: 1,
-                unit: RecurrenceUnit::Weeks,
-            })
+            Some(Recurrence::every(1, RecurrenceUnit::Weeks))
         );
         assert!(state.chat_history.iter().any(|t| {
             t.content
@@ -2859,10 +2872,7 @@ mod tests {
             reply: "Done.".to_string(),
             actions: vec![ChatAction::SetRecurrence {
                 task_id,
-                recurrence: Recurrence {
-                    interval: 3,
-                    unit: RecurrenceUnit::Days,
-                },
+                recurrence: Recurrence::every(3, RecurrenceUnit::Days),
             }],
             parse_failures: Vec::new(),
         });
@@ -2871,17 +2881,14 @@ mod tests {
         let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
         assert_eq!(
             task.recurrence,
-            Some(Recurrence {
-                interval: 3,
-                unit: RecurrenceUnit::Days,
-            })
+            Some(Recurrence::every(3, RecurrenceUnit::Days))
         );
         // A recurring task with no due date gets one so it actually shows up.
         assert_eq!(task.due_date, Some(Local::now().date_naive()));
         assert!(
             state.chat_history[0]
                 .content
-                .contains("set \"Deep Lunge\" to repeat every 3 day(s)")
+                .contains("set \"Deep Lunge\" to repeat every 3 days")
         );
     }
 
@@ -2902,10 +2909,7 @@ mod tests {
             reply: "Done.".to_string(),
             actions: vec![ChatAction::SetRecurrence {
                 task_id,
-                recurrence: Recurrence {
-                    interval: 1,
-                    unit: RecurrenceUnit::Weeks,
-                },
+                recurrence: Recurrence::every(1, RecurrenceUnit::Weeks),
             }],
             parse_failures: Vec::new(),
         });
@@ -2924,10 +2928,8 @@ mod tests {
         state.quick_capture_submit();
         let task_id = state.visible_tasks[0].id;
         state.select_task(task_id);
-        state.task_edit_buffer.as_mut().unwrap().recurrence = Some(Recurrence {
-            interval: 1,
-            unit: RecurrenceUnit::Days,
-        });
+        state.task_edit_buffer.as_mut().unwrap().recurrence =
+            Some(Recurrence::every(1, RecurrenceUnit::Days));
         state.save_task_edits();
         let due = task_repo::get(&state.conn, task_id)
             .unwrap()
@@ -3016,10 +3018,7 @@ mod tests {
             reply: "Here's your weekend.".to_string(),
             actions: vec![ChatAction::SetRecurrence {
                 task_id,
-                recurrence: Recurrence {
-                    interval: 1,
-                    unit: RecurrenceUnit::Days,
-                },
+                recurrence: Recurrence::every(1, RecurrenceUnit::Days),
             }],
             parse_failures: Vec::new(),
         });
@@ -3028,7 +3027,7 @@ mod tests {
         assert!(
             state.chat_history[0]
                 .content
-                .contains("set \"Garage WiFi\" to repeat every 1 day(s)")
+                .contains("set \"Garage WiFi\" to repeat every day")
         );
         let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
         assert!(task.recurrence.is_none());
@@ -3084,10 +3083,7 @@ mod tests {
         let mut chore = Task::new_inbox("water the plants");
         chore.completed = true;
         chore.completed_at = Some(Utc::now() - Duration::days(1));
-        chore.recurrence = Some(Recurrence {
-            interval: 1,
-            unit: RecurrenceUnit::Weeks,
-        });
+        chore.recurrence = Some(Recurrence::every(1, RecurrenceUnit::Weeks));
         task_repo::create(&state.conn, &chore).unwrap();
 
         let ctx = state.build_chat_context();
@@ -3728,10 +3724,8 @@ mod tests {
         let task_id = state.visible_tasks[0].id;
 
         state.select_task(task_id);
-        state.task_edit_buffer.as_mut().unwrap().recurrence = Some(Recurrence {
-            interval: 3,
-            unit: RecurrenceUnit::Days,
-        });
+        state.task_edit_buffer.as_mut().unwrap().recurrence =
+            Some(Recurrence::every(3, RecurrenceUnit::Days));
         state.save_task_edits();
 
         state.toggle_complete(task_id, true);
@@ -3747,10 +3741,7 @@ mod tests {
         assert_eq!(next.title, "water plants");
         assert_eq!(
             next.recurrence,
-            Some(Recurrence {
-                interval: 3,
-                unit: RecurrenceUnit::Days,
-            })
+            Some(Recurrence::every(3, RecurrenceUnit::Days))
         );
         let expected_due = original.completed_at.unwrap().date_naive() + chrono::Duration::days(3);
         assert_eq!(next.due_date, Some(expected_due));
