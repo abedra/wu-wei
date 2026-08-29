@@ -1,5 +1,6 @@
 use eframe::egui;
 
+use crate::calendar;
 use crate::llm::ProviderKind;
 use crate::state::AppState;
 use crate::ui::theme;
@@ -281,6 +282,16 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
             if let Some(status) = &state.google_auth_status {
                 ui.weak(status);
             }
+            ui.horizontal(|ui| {
+                ui.label("Refresh every");
+                ui.add(
+                    egui::DragValue::new(&mut draft.gcal_refresh_minutes)
+                        .speed(1.0)
+                        .range(calendar::MIN_REFRESH_MINUTES..=calendar::MAX_REFRESH_MINUTES)
+                        .suffix(" min"),
+                );
+            });
+            ui.weak("How often the Today view re-fetches events while it's open.");
 
             ui.separator();
             ui.heading("Keyboard Shortcuts");

@@ -193,6 +193,10 @@ pub struct SettingsDraft {
     /// Same transient, not-persisted purpose as `show_api_key`, for the
     /// client secret field.
     pub show_gcal_client_secret: bool,
+    /// How often the Today view auto-refreshes calendar events, in minutes.
+    /// Seeded (and clamped) via `calendar::refresh_minutes`, persisted as
+    /// `gcal_refresh_minutes` on Save.
+    pub gcal_refresh_minutes: u64,
     /// Whether `settings` already has a Google refresh token saved —
     /// display-only (drives "Connect" vs "Connected" in `ui::settings`),
     /// never itself written back on Save; only `AppState::poll_google_auth`/
@@ -214,6 +218,14 @@ fn current_db_path(conn: &Connection) -> String {
         .filter(|p| !p.is_empty())
         .unwrap_or("wu_wei.db")
         .to_string()
+}
+
+/// The calendar auto-refresh interval as a `Duration`, from the raw
+/// `settings` map — wraps `calendar::refresh_minutes` (which handles the
+/// default and clamping) so both `AppState::new` and `save_settings` derive
+/// it the same way.
+fn calendar_refresh_interval(settings: &std::collections::HashMap<String, String>) -> Duration {
+    Duration::minutes(calendar::refresh_minutes(settings) as i64)
 }
 
 /// Drops repeated entries, keeping the first occurrence's position — used
@@ -279,6 +291,7 @@ impl SettingsDraft {
             gcal_client_secret: field("gcal_client_secret", None),
             show_gcal_client_secret: false,
             gcal_connected: non_blank("gcal_refresh_token").is_some(),
+            gcal_refresh_minutes: calendar::refresh_minutes(&settings),
         }
     }
 }
@@ -452,6 +465,10 @@ pub struct AppState {
     /// When `maybe_auto_sync_calendar` last actually ran one — `None` means
     /// it hasn't yet, mirrors `last_auto_sync`.
     pub last_calendar_sync: Option<chrono::DateTime<Utc>>,
+    /// How long `maybe_auto_sync_calendar` waits between auto-refreshes.
+    /// Resolved from the `gcal_refresh_minutes` setting at startup and again
+    /// on every `save_settings` (see `calendar::refresh_minutes`).
+    pub calendar_refresh_interval: Duration,
     /// Set while the Google OAuth loopback flow (browser + local redirect
     /// listener) is in flight; polled once per frame in `poll_google_auth`.
     pub google_auth_pending: Option<Receiver<Result<GoogleTokenSet, String>>>,
@@ -509,6 +526,7 @@ impl AppState {
             calendar_busy: false,
             calendar_status: None,
             last_calendar_sync: None,
+            calendar_refresh_interval: calendar_refresh_interval(&llm_settings),
             google_auth_pending: None,
             google_auth_status: None,
         };
@@ -845,13 +863,12 @@ impl AppState {
     /// `set_perspective` on switching to Today, so the first visit doesn't
     /// wait out the interval.
     pub fn maybe_auto_sync_calendar(&mut self) {
-        const AUTO_SYNC_INTERVAL: Duration = Duration::minutes(5);
         if self.perspective != Perspective::Today || self.calendar_busy {
             return;
         }
         let due = match self.last_calendar_sync {
             None => true,
-            Some(last) => Utc::now() - last >= AUTO_SYNC_INTERVAL,
+            Some(last) => Utc::now() - last >= self.calendar_refresh_interval,
         };
         if !due {
             return;
@@ -1932,6 +1949,13 @@ impl AppState {
             ProviderKind::OpenAi => "openai",
             ProviderKind::Anthropic => "anthropic",
         };
+        let gcal_refresh_minutes = draft
+            .gcal_refresh_minutes
+            .clamp(
+                calendar::MIN_REFRESH_MINUTES,
+                calendar::MAX_REFRESH_MINUTES,
+            )
+            .to_string();
         let pairs = [
             ("llm_provider", provider),
             ("llm_api_key", draft.llm_api_key.trim()),
@@ -1940,13 +1964,15 @@ impl AppState {
             ("sync_folder_path", draft.sync_folder_path.trim()),
             ("gcal_client_id", draft.gcal_client_id.trim()),
             ("gcal_client_secret", draft.gcal_client_secret.trim()),
+            ("gcal_refresh_minutes", gcal_refresh_minutes.as_str()),
         ];
         if let Err(e) = settings_repo::set_many(&self.conn, &pairs) {
             self.error_message = Some(e.to_string());
             return;
         }
-        let llm_settings = settings_repo::get_all(&self.conn).unwrap_or_default();
-        self.llm_config = LlmConfig::resolve(&llm_settings);
+        let settings = settings_repo::get_all(&self.conn).unwrap_or_default();
+        self.llm_config = LlmConfig::resolve(&settings);
+        self.calendar_refresh_interval = calendar_refresh_interval(&settings);
     }
 
     /// Reconnects to a different database file, live, and remembers it (see
@@ -3631,6 +3657,43 @@ mod tests {
         assert_eq!(
             saved.get("llm_api_key").map(String::as_str),
             Some("sk-live")
+        );
+    }
+
+    #[test]
+    fn save_settings_persists_the_calendar_refresh_rate_and_updates_the_live_interval() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        assert_eq!(
+            state.calendar_refresh_interval,
+            Duration::minutes(calendar::DEFAULT_REFRESH_MINUTES as i64)
+        );
+
+        state.open_settings();
+        state.settings.as_mut().unwrap().gcal_refresh_minutes = 20;
+        state.save_settings();
+
+        assert_eq!(state.calendar_refresh_interval, Duration::minutes(20));
+        let saved = settings_repo::get_all(&state.conn).unwrap();
+        assert_eq!(
+            saved.get("gcal_refresh_minutes").map(String::as_str),
+            Some("20")
+        );
+
+        // A reload of the draft reflects the saved value.
+        state.open_settings();
+        assert_eq!(state.settings.as_ref().unwrap().gcal_refresh_minutes, 20);
+    }
+
+    #[test]
+    fn save_settings_clamps_an_out_of_range_calendar_refresh_rate() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.open_settings();
+        state.settings.as_mut().unwrap().gcal_refresh_minutes = 10_000_000;
+        state.save_settings();
+
+        assert_eq!(
+            state.calendar_refresh_interval,
+            Duration::minutes(calendar::MAX_REFRESH_MINUTES as i64)
         );
     }
 

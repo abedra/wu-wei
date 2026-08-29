@@ -40,6 +40,28 @@ pub struct GoogleCalendarConfig {
     pub expiry: DateTime<Utc>,
 }
 
+/// How often the Today view auto-refreshes calendar events, in minutes.
+/// Settings key `gcal_refresh_minutes`; user-configurable in Settings.
+pub const DEFAULT_REFRESH_MINUTES: u64 = 5;
+/// Clamp bounds for the setting — a stray `0` would hammer the API on every
+/// frame, and anything past a day isn't a "refresh rate" any more.
+pub const MIN_REFRESH_MINUTES: u64 = 1;
+pub const MAX_REFRESH_MINUTES: u64 = 1440;
+
+/// The configured calendar auto-refresh interval in minutes, resolved from
+/// the `settings` map the same "blank/garbage counts as absent" way as
+/// [`GoogleCalendarConfig::resolve`]: an unset, unparsable, or out-of-range
+/// value falls back to [`DEFAULT_REFRESH_MINUTES`], and anything in between
+/// is clamped to `[MIN_REFRESH_MINUTES, MAX_REFRESH_MINUTES]`.
+pub fn refresh_minutes(settings: &HashMap<String, String>) -> u64 {
+    settings
+        .get("gcal_refresh_minutes")
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&m| m >= MIN_REFRESH_MINUTES)
+        .unwrap_or(DEFAULT_REFRESH_MINUTES)
+        .min(MAX_REFRESH_MINUTES)
+}
+
 impl GoogleCalendarConfig {
     /// Settings keys: `gcal_client_id`, `gcal_client_secret`,
     /// `gcal_refresh_token`, `gcal_access_token`, `gcal_token_expiry` (an
@@ -147,6 +169,31 @@ mod tests {
         assert_eq!(config.client_secret, "secret");
         assert_eq!(config.refresh_token, "refresh");
         assert_eq!(config.access_token, "access");
+    }
+
+    #[test]
+    fn refresh_minutes_falls_back_to_the_default_when_unset_or_unusable() {
+        assert_eq!(refresh_minutes(&HashMap::new()), DEFAULT_REFRESH_MINUTES);
+        assert_eq!(
+            refresh_minutes(&settings(&[("gcal_refresh_minutes", "banana")])),
+            DEFAULT_REFRESH_MINUTES
+        );
+        assert_eq!(
+            refresh_minutes(&settings(&[("gcal_refresh_minutes", "0")])),
+            DEFAULT_REFRESH_MINUTES
+        );
+    }
+
+    #[test]
+    fn refresh_minutes_reads_a_valid_value_and_clamps_a_huge_one() {
+        assert_eq!(
+            refresh_minutes(&settings(&[("gcal_refresh_minutes", "15")])),
+            15
+        );
+        assert_eq!(
+            refresh_minutes(&settings(&[("gcal_refresh_minutes", "999999")])),
+            MAX_REFRESH_MINUTES
+        );
     }
 
     #[test]

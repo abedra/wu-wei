@@ -114,5 +114,5 @@ The Today view can show today's events from a Google Calendar (read-only, primar
 3. Create an OAuth client ID of type **Desktop app**. Desktop app clients accept a loopback redirect (`http://127.0.0.1:<any port>/`) without registering an exact port, which is what Wu Wei uses to receive the sign-in response.
 4. In Wu Wei's Settings (`Cmd+,`) → Calendar, paste the client ID and client secret, then click **Connect Google Calendar**. Your browser opens Google's consent screen; approving it hands control back to the app automatically.
 
-Once connected, Today's events appear above the task list whenever you're on the Today perspective, refreshing automatically every few minutes. Disconnecting from Settings revokes nothing on Google's side — it just clears Wu Wei's saved tokens.
+Once connected, Today's events appear above the task list whenever you're on the Today perspective, refreshing automatically on an interval you set in Settings → Calendar → **Refresh every** (default 5 minutes, 1–1440). The refresh only runs while the Today view is open. Disconnecting from Settings revokes nothing on Google's side — it just clears Wu Wei's saved tokens.
 
