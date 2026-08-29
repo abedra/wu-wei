@@ -15,6 +15,12 @@ pub fn field_id() -> egui::Id {
 /// but its input is disabled with an explanatory message when no LLM
 /// provider is configured.
 pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
+    let llm_available = state.llm_available();
+    let mut send_clicked = false;
+    let mut apply_clicked = false;
+    let mut discard_clicked = false;
+    let mut weekly_summary_clicked = false;
+
     ui.horizontal(|ui| {
         ui.heading(
             egui::RichText::new("AI")
@@ -22,12 +28,17 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                 .strong(),
         );
         ui.weak("Ask it to find, file, or bulk-update tasks — e.g. \"roll all of my overdue tasks to today\".");
+        if ui
+            .add_enabled(
+                llm_available && !state.chat_busy,
+                egui::Button::new("Weekly summary"),
+            )
+            .on_hover_text("Recap what you completed in the last 7 days (recurring chores excluded)")
+            .clicked()
+        {
+            weekly_summary_clicked = true;
+        }
     });
-
-    let llm_available = state.llm_available();
-    let mut send_clicked = false;
-    let mut apply_clicked = false;
-    let mut discard_clicked = false;
 
     // Partition the remaining space with nested panels: the input strip is
     // anchored to the bottom, and the history fills the middle. Letting inner
@@ -131,5 +142,8 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     }
     if send_clicked {
         state.chat_send();
+    }
+    if weekly_summary_clicked {
+        state.request_weekly_summary();
     }
 }

@@ -50,6 +50,18 @@ pub struct ChatTaskSummary {
     pub due_date: Option<NaiveDate>,
 }
 
+/// A task the user finished recently, handed to the model so it can write a
+/// weekly review ("what did I get done this week?"). Recurring-task
+/// completions are deliberately left out upstream — routine upkeep, not the
+/// week's notable work. `id` is present so a follow-up like "actually reopen
+/// that one" still works.
+pub struct ChatCompletedTaskSummary {
+    pub id: TaskId,
+    pub title: String,
+    pub project: Option<String>,
+    pub completed_on: NaiveDate,
+}
+
 /// Today's Google Calendar events, for the model's awareness only — there's
 /// no action to create/move/delete a calendar event, so this is handed over
 /// purely as read-only context (e.g. "am I free this afternoon?", "what's on
@@ -66,6 +78,12 @@ pub struct ChatContext {
     pub tasks: Vec<ChatTaskSummary>,
     pub project_names: Vec<String>,
     pub calendar_events: Vec<ChatCalendarEventSummary>,
+    /// The earliest completion date covered by `completed_recently` — the
+    /// start of the "week" a summary request should describe.
+    pub completed_since: NaiveDate,
+    /// Non-recurring tasks completed on or after `completed_since`, newest
+    /// first — the material for a weekly summary.
+    pub completed_recently: Vec<ChatCompletedTaskSummary>,
 }
 
 /// A single database mutation the model asked for, already validated (task

@@ -2,7 +2,10 @@ use chrono::{Duration, NaiveDate};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ChatAction, ChatCalendarEventSummary, ChatContext, ChatReply, ParsedTask, PromptContext};
+use super::{
+    ChatAction, ChatCalendarEventSummary, ChatCompletedTaskSummary, ChatContext, ChatReply,
+    ParsedTask, PromptContext,
+};
 use crate::domain::task::{Recurrence, RecurrenceUnit, TaskId};
 
 /// A precomputed weekday→date lookup for today plus the next 6 days, handed
@@ -39,6 +42,26 @@ fn calendar_events_json(events: &[ChatCalendarEventSummary]) -> String {
                     "title": e.title,
                     "time": e.time,
                     "location": e.location,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Non-recurring tasks the user finished this week, ready to splice into the
+/// chat system prompt as JSON — `[]` when nothing qualifies, same
+/// "absent looks like empty" convention as `tasks_json`.
+fn completed_tasks_json(completed: &[ChatCompletedTaskSummary]) -> String {
+    serde_json::to_string(
+        &completed
+            .iter()
+            .map(|t| {
+                json!({
+                    "id": t.id.0.to_string(),
+                    "title": t.title,
+                    "project": t.project,
+                    "completed_on": t.completed_on.format("%Y-%m-%d").to_string(),
                 })
             })
             .collect::<Vec<_>>(),
@@ -203,6 +226,7 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
     )
     .unwrap_or_else(|_| "[]".to_string());
     let calendar_json = calendar_events_json(&context.calendar_events);
+    let completed_json = completed_tasks_json(&context.completed_recently);
 
     format!(
         "You are an assistant embedded in Wu Wei, a GTD-style task manager. The user talks to \
@@ -219,7 +243,18 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
          your own calculation. Existing projects: \
          {projects}. Here is the user's current set of open (not \
          completed) tasks as JSON — only ever reference a task by an \"id\" value copied \
-         verbatim from this list, never invent one: {tasks_json}\n\n\
+         verbatim from this list (or from the completed-tasks list below), never invent one: \
+         {tasks_json}\n\n\
+         Here are the tasks the user has completed since {completed_since} (i.e. this past \
+         week), as JSON — each with a \"title\", optional \"project\", a \"completed_on\" date, \
+         and an \"id\" you may use for a follow-up action like reopen_task. Routine recurring \
+         tasks are deliberately left out of this list. An empty list means nothing qualifying \
+         was completed this week: {completed_json}\n\n\
+         Use this completed list when the user asks you to summarize, recap, or review their \
+         week (e.g. \"what did I get done this week?\", \"write my weekly summary\"): group the \
+         work by project, write a short readable recap in your reply text, and return an empty \
+         actions list — a summary is just something you write, never a set of changes. Only \
+         mention that the week was quiet if the list really is empty.\n\n\
          Here are today's events from the user's connected Google Calendar as JSON (each with \
          a \"title\", a \"time\" already in the user's local time zone — either a clock time or \
          \"All day\" — and an optional \"location\"); an empty list just means nothing's on the \
@@ -293,7 +328,8 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
          task_id that doesn't exist in the list above). create_project/delete_project/\
          create_task act on a project or a not-yet-existing task, so leave \
          task_id null for them; every other action, including delete_task, needs a task_id \
-         taken from the open-tasks list above. If a command implies several tasks, emit one \
+         taken from the open-tasks list above (or, for reopen_task, from the completed-tasks \
+         list). If a command implies several tasks, emit one \
          action per matching task — except rescheduling every overdue task, which has its own \
          single reschedule_overdue action (above). If no task/project \
          clearly matches what a command describes, that's the same kind of uncertainty as \
@@ -310,6 +346,8 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
         projects = projects,
         tasks_json = tasks_json,
         calendar_json = calendar_json,
+        completed_json = completed_json,
+        completed_since = context.completed_since.format("%Y-%m-%d"),
     )
 }
 
@@ -574,18 +612,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn chat_system_prompt_includes_todays_calendar_events() {
-        let context = ChatContext {
-            today: NaiveDate::from_ymd_opt(2026, 8, 19).unwrap(),
+    fn chat_context(today: NaiveDate) -> ChatContext {
+        ChatContext {
+            today,
             tasks: Vec::new(),
             project_names: Vec::new(),
-            calendar_events: vec![ChatCalendarEventSummary {
-                title: "Dentist".to_string(),
-                time: "2:00 PM".to_string(),
-                location: Some("123 Main St".to_string()),
-            }],
-        };
+            calendar_events: Vec::new(),
+            completed_since: today - Duration::days(6),
+            completed_recently: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn chat_system_prompt_includes_todays_calendar_events() {
+        let mut context = chat_context(NaiveDate::from_ymd_opt(2026, 8, 19).unwrap());
+        context.calendar_events = vec![ChatCalendarEventSummary {
+            title: "Dentist".to_string(),
+            time: "2:00 PM".to_string(),
+            location: Some("123 Main St".to_string()),
+        }];
         let prompt = chat_system_prompt(&context);
         assert!(prompt.contains("\"title\":\"Dentist\""));
         assert!(prompt.contains("\"time\":\"2:00 PM\""));
@@ -594,15 +639,25 @@ mod tests {
 
     #[test]
     fn chat_system_prompt_shows_an_empty_calendar_as_an_empty_list() {
-        let context = ChatContext {
-            today: NaiveDate::from_ymd_opt(2026, 8, 19).unwrap(),
-            tasks: Vec::new(),
-            project_names: Vec::new(),
-            calendar_events: Vec::new(),
-        };
+        let context = chat_context(NaiveDate::from_ymd_opt(2026, 8, 19).unwrap());
         let prompt = chat_system_prompt(&context);
         assert!(prompt.contains("Google Calendar as JSON"));
         assert!(prompt.contains("not that the calendar is disconnected: []"));
+    }
+
+    #[test]
+    fn chat_system_prompt_lists_completed_tasks_for_the_week() {
+        let mut context = chat_context(NaiveDate::from_ymd_opt(2026, 8, 19).unwrap());
+        context.completed_recently = vec![ChatCompletedTaskSummary {
+            id: TaskId::new(),
+            title: "Ship the release".to_string(),
+            project: Some("Work".to_string()),
+            completed_on: NaiveDate::from_ymd_opt(2026, 8, 17).unwrap(),
+        }];
+        let prompt = chat_system_prompt(&context);
+        assert!(prompt.contains("completed since 2026-08-13"));
+        assert!(prompt.contains("\"title\":\"Ship the release\""));
+        assert!(prompt.contains("\"completed_on\":\"2026-08-17\""));
     }
 
     fn extraction(title: &str, due_date: Option<&str>, project: Option<&str>) -> RawExtraction {

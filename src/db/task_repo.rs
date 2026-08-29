@@ -1,4 +1,4 @@
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
@@ -197,6 +197,22 @@ pub fn list_overdue(conn: &Connection, today: NaiveDate) -> DbResult<Vec<Task>> 
 
 pub fn list_completed(conn: &Connection) -> DbResult<Vec<Task>> {
     list_where(conn, "completed = 1", params![], "completed_at DESC")
+}
+
+/// Non-recurring tasks completed at or after `since`, newest first — the raw
+/// material for the weekly review the AI assistant summarizes. Recurring
+/// tasks are excluded on purpose: their completions are routine upkeep, not
+/// the week's notable work. `since` is an absolute instant (the caller
+/// converts the local start-of-week to UTC), so `completed_at`'s stored UTC
+/// value can be compared directly.
+pub fn list_completed_since(conn: &Connection, since: DateTime<Utc>) -> DbResult<Vec<Task>> {
+    list_where(
+        conn,
+        "completed = 1 AND recurrence_interval IS NULL \
+         AND completed_at IS NOT NULL AND completed_at >= ?1",
+        params![since],
+        "completed_at DESC",
+    )
 }
 
 /// Stamps `updated_at` to now — like every mutator here — so the change
@@ -533,6 +549,38 @@ mod tests {
         let completed = list_completed(&conn).unwrap();
         assert_eq!(completed.len(), 3);
         assert!(completed.iter().all(|t| t.completed_at.is_some()));
+    }
+
+    #[test]
+    fn list_completed_since_covers_the_window_and_skips_recurring_tasks() {
+        let conn = db::open_in_memory().unwrap();
+        let now = Utc::now();
+
+        let mut recent = Task::new_inbox("finished a report");
+        recent.completed = true;
+        recent.completed_at = Some(now - Duration::days(2));
+        create(&conn, &recent).unwrap();
+
+        let mut old = Task::new_inbox("finished last month");
+        old.completed = true;
+        old.completed_at = Some(now - Duration::days(30));
+        create(&conn, &old).unwrap();
+
+        let mut recurring = Task::new_inbox("took out the trash");
+        recurring.completed = true;
+        recurring.completed_at = Some(now - Duration::days(1));
+        recurring.recurrence = Some(Recurrence {
+            interval: 1,
+            unit: RecurrenceUnit::Weeks,
+        });
+        create(&conn, &recurring).unwrap();
+
+        let still_open = Task::new_inbox("not done yet");
+        create(&conn, &still_open).unwrap();
+
+        let result = list_completed_since(&conn, now - Duration::days(7)).unwrap();
+        let titles: Vec<&str> = result.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, vec!["finished a report"]);
     }
 
     #[test]

@@ -12,8 +12,8 @@ use crate::db_bootstrap;
 use crate::domain::project::{Project, ProjectId, ProjectKind, ProjectStatus};
 use crate::domain::task::{Recurrence, RecurrenceUnit, Task, TaskId};
 use crate::llm::{
-    self, ChatAction, ChatCalendarEventSummary, ChatContext, ChatReply, ChatRole,
-    ChatTaskSummary, ChatTurn, LlmConfig, ParsedTask, PromptContext, ProviderKind,
+    self, ChatAction, ChatCalendarEventSummary, ChatCompletedTaskSummary, ChatContext, ChatReply,
+    ChatRole, ChatTaskSummary, ChatTurn, LlmConfig, ParsedTask, PromptContext, ProviderKind,
 };
 use crate::sync::{self, SyncSummary};
 
@@ -1122,17 +1122,42 @@ impl AppState {
     }
 
     fn build_chat_context(&self) -> ChatContext {
+        let project_name = |pid: crate::domain::project::ProjectId| {
+            self.projects
+                .iter()
+                .find(|p| p.id == pid)
+                .map(|p| p.name.clone())
+        };
         let open_tasks = task_repo::list_open(&self.conn).unwrap_or_default();
         let tasks = open_tasks
             .iter()
             .map(|t| ChatTaskSummary {
                 id: t.id,
                 title: t.title.clone(),
-                project: t
-                    .project_id
-                    .and_then(|pid| self.projects.iter().find(|p| p.id == pid))
-                    .map(|p| p.name.clone()),
+                project: t.project_id.and_then(&project_name),
                 due_date: t.due_date,
+            })
+            .collect();
+
+        // "This week" for a summary request: the last 7 days, ending today.
+        let today = Local::now().date_naive();
+        let completed_since = today - Duration::days(6);
+        let since_utc = completed_since
+            .and_hms_opt(0, 0, 0)
+            .and_then(|naive| naive.and_local_timezone(Local).earliest())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|| Utc::now() - Duration::days(7));
+        let completed_recently = task_repo::list_completed_since(&self.conn, since_utc)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|t| {
+                let completed_on = t.completed_at?.with_timezone(&Local).date_naive();
+                Some(ChatCompletedTaskSummary {
+                    id: t.id,
+                    title: t.title.clone(),
+                    project: t.project_id.and_then(&project_name),
+                    completed_on,
+                })
             })
             .collect();
         let calendar_events = self
@@ -1149,11 +1174,29 @@ impl AppState {
             })
             .collect();
         ChatContext {
-            today: Local::now().date_naive(),
+            today,
             tasks,
             project_names: self.projects.iter().map(|p| p.name.clone()).collect(),
             calendar_events,
+            completed_since,
+            completed_recently,
         }
+    }
+
+    /// Entry point for the AI panel's "Weekly summary" button: sends a fixed
+    /// prompt as though the user had typed it, then restores whatever they
+    /// had half-typed in the input box.
+    pub fn request_weekly_summary(&mut self) {
+        if self.chat_busy {
+            return;
+        }
+        let half_typed = std::mem::take(&mut self.chat_input);
+        self.chat_input = "Summarize what I accomplished this week from my completed tasks. \
+             Group the work by project, keep it to a short readable recap, and skip routine \
+             recurring chores."
+            .to_string();
+        self.chat_send();
+        self.chat_input = half_typed;
     }
 
     /// Polled once per frame from `app.rs`. Non-blocking: does nothing while
@@ -2908,6 +2951,59 @@ mod tests {
         let mut state = AppState::new(crate::db::open_in_memory().unwrap());
         state.discard_pending_chat_actions();
         assert!(state.chat_history.is_empty());
+    }
+
+    #[test]
+    fn chat_context_includes_this_weeks_non_recurring_completed_tasks() {
+        let state = AppState::new(crate::db::open_in_memory().unwrap());
+
+        let mut done = Task::new_inbox("shipped the thing");
+        done.completed = true;
+        done.completed_at = Some(Utc::now() - Duration::days(2));
+        task_repo::create(&state.conn, &done).unwrap();
+
+        let mut old = Task::new_inbox("finished last month");
+        old.completed = true;
+        old.completed_at = Some(Utc::now() - Duration::days(30));
+        task_repo::create(&state.conn, &old).unwrap();
+
+        let mut chore = Task::new_inbox("water the plants");
+        chore.completed = true;
+        chore.completed_at = Some(Utc::now() - Duration::days(1));
+        chore.recurrence = Some(Recurrence {
+            interval: 1,
+            unit: RecurrenceUnit::Weeks,
+        });
+        task_repo::create(&state.conn, &chore).unwrap();
+
+        let ctx = state.build_chat_context();
+        let titles: Vec<&str> = ctx
+            .completed_recently
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(titles, vec!["shipped the thing"]);
+        assert_eq!(
+            ctx.completed_since,
+            Local::now().date_naive() - Duration::days(6)
+        );
+    }
+
+    #[test]
+    fn request_weekly_summary_sends_a_prompt_and_preserves_the_draft() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.llm_config = None; // chat_send's early-return path is enough here
+        state.chat_input = "half-typed question".to_string();
+
+        state.request_weekly_summary();
+
+        assert_eq!(state.chat_input, "half-typed question");
+        assert_eq!(state.chat_history[0].role, ChatRole::User);
+        assert!(
+            state.chat_history[0]
+                .content
+                .contains("accomplished this week")
+        );
     }
 
     #[test]
