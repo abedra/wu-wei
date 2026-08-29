@@ -16,6 +16,18 @@ use super::{
 /// behind the `Provider` trait.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// The Messages API requires `max_tokens` on every request, so — unlike the
+/// OpenAI-compatible client, which just omits it — this one always sends a
+/// number. When the user hasn't set `llm_max_tokens` (see
+/// [`LlmConfig::max_tokens`]) these per-request ceilings apply.
+const DEFAULT_PARSE_MAX_TOKENS: u32 = 1024;
+/// Higher than the capture-parse call: a bulk command like "complete all my
+/// Errands tasks" emits one action per task, and a truncated response is
+/// unparsable JSON (or, worse, a silently short action list) — see the
+/// `stop_reason` check in [`AnthropicProvider::chat`].
+const DEFAULT_CHAT_MAX_TOKENS: u32 = 16384;
+const DEFAULT_DUE_DATE_MAX_TOKENS: u32 = 256;
+
 pub struct AnthropicProvider {
     config: LlmConfig,
 }
@@ -44,7 +56,7 @@ impl Provider for AnthropicProvider {
         let url = format!("{}/v1/messages", self.config.base_url.trim_end_matches('/'));
         let body = json!({
             "model": self.config.model,
-            "max_tokens": 1024,
+            "max_tokens": self.config.max_tokens.unwrap_or(DEFAULT_PARSE_MAX_TOKENS),
             "system": system_prompt(context),
             "messages": [
                 { "role": "user", "content": raw_text },
@@ -94,11 +106,7 @@ impl Provider for AnthropicProvider {
 
         let body = json!({
             "model": self.config.model,
-            // Higher than the capture-parse call: a bulk command like
-            // "complete all my Errands tasks" emits one action per task, and a
-            // truncated response is unparsable JSON (or, worse, a silently
-            // short action list) — see the stop_reason check below.
-            "max_tokens": 16384,
+            "max_tokens": self.config.max_tokens.unwrap_or(DEFAULT_CHAT_MAX_TOKENS),
             "system": chat_system_prompt(context),
             "messages": messages,
             "output_config": {
@@ -143,7 +151,7 @@ impl Provider for AnthropicProvider {
         let url = format!("{}/v1/messages", self.config.base_url.trim_end_matches('/'));
         let body = json!({
             "model": self.config.model,
-            "max_tokens": 256,
+            "max_tokens": self.config.max_tokens.unwrap_or(DEFAULT_DUE_DATE_MAX_TOKENS),
             "system": due_date_prompt(today),
             "messages": [
                 { "role": "user", "content": text },

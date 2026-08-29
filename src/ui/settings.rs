@@ -175,6 +175,18 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                 ui.label("Model");
                 ui.add(egui::TextEdit::singleline(&mut draft.llm_model).desired_width(260.0));
             });
+            ui.horizontal(|ui| {
+                ui.label("Max tokens");
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.llm_max_tokens)
+                        .hint_text("provider default")
+                        .desired_width(260.0),
+                );
+            });
+            ui.weak(
+                "Optional cap on a single response's length. Leave blank to \
+                 use the provider's own limit.",
+            );
 
             ui.separator();
             ui.heading("Database");

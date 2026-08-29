@@ -179,6 +179,12 @@ pub struct LlmConfig {
     pub api_key: String,
     pub base_url: String,
     pub model: String,
+    /// Optional ceiling on a single response's length. `None` means "let the
+    /// service decide": OpenAI-compatible requests omit `max_tokens` entirely,
+    /// and the Anthropic client (whose API requires the field) falls back to
+    /// its own per-request defaults — see `llm::anthropic`. Set via
+    /// `llm_max_tokens` / `WU_WEI_LLM_MAX_TOKENS`.
+    pub max_tokens: Option<u32>,
 }
 
 impl LlmConfig {
@@ -190,8 +196,9 @@ impl LlmConfig {
     /// simply unavailable (not an error) until set up.
     ///
     /// `settings` keys: `llm_provider` (`openai`/`anthropic`), `llm_api_key`,
-    /// `llm_base_url`, `llm_model` — mirroring `WU_WEI_LLM_PROVIDER`,
-    /// `WU_WEI_LLM_API_KEY`, `WU_WEI_LLM_BASE_URL`, `WU_WEI_LLM_MODEL`.
+    /// `llm_base_url`, `llm_model`, `llm_max_tokens` — mirroring
+    /// `WU_WEI_LLM_PROVIDER`, `WU_WEI_LLM_API_KEY`, `WU_WEI_LLM_BASE_URL`,
+    /// `WU_WEI_LLM_MODEL`, `WU_WEI_LLM_MAX_TOKENS`.
     pub fn resolve(settings: &HashMap<String, String>) -> Option<Self> {
         let setting_or_env = |setting_key: &str, env_key: &str| -> Option<String> {
             settings
@@ -219,11 +226,15 @@ impl LlmConfig {
             .unwrap_or_else(|| default_base_url.to_string());
         let model = setting_or_env("llm_model", "WU_WEI_LLM_MODEL")
             .unwrap_or_else(|| default_model.to_string());
+        let max_tokens = setting_or_env("llm_max_tokens", "WU_WEI_LLM_MAX_TOKENS")
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .filter(|&n| n > 0);
         Some(LlmConfig {
             provider,
             api_key,
             base_url,
             model,
+            max_tokens,
         })
     }
 
@@ -309,6 +320,30 @@ mod tests {
         assert_eq!(config.api_key, "sk-test");
         assert_eq!(config.base_url, "https://example.test");
         assert_eq!(config.model, "claude-test");
+        assert_eq!(config.max_tokens, None);
+    }
+
+    #[test]
+    fn resolve_reads_a_valid_max_tokens_override_and_ignores_junk() {
+        let base = [
+            ("llm_provider".to_string(), "anthropic".to_string()),
+            ("llm_api_key".to_string(), "sk-test".to_string()),
+        ];
+
+        let mut with_value: HashMap<_, _> = base.iter().cloned().collect();
+        with_value.insert("llm_max_tokens".to_string(), "32000".to_string());
+        assert_eq!(
+            LlmConfig::resolve(&with_value).unwrap().max_tokens,
+            Some(32000)
+        );
+
+        let mut with_junk: HashMap<_, _> = base.iter().cloned().collect();
+        with_junk.insert("llm_max_tokens".to_string(), "lots".to_string());
+        assert_eq!(LlmConfig::resolve(&with_junk).unwrap().max_tokens, None);
+
+        let mut with_zero: HashMap<_, _> = base.iter().cloned().collect();
+        with_zero.insert("llm_max_tokens".to_string(), "0".to_string());
+        assert_eq!(LlmConfig::resolve(&with_zero).unwrap().max_tokens, None);
     }
 
     #[test]
@@ -321,5 +356,6 @@ mod tests {
         let config = LlmConfig::resolve(&settings).unwrap();
         assert_eq!(config.base_url, "https://api.anthropic.com");
         assert_eq!(config.model, "claude-opus-5");
+        assert_eq!(config.max_tokens, None);
     }
 }

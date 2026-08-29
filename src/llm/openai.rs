@@ -22,6 +22,16 @@ impl OpenAiProvider {
     pub fn new(config: LlmConfig) -> Self {
         Self { config }
     }
+
+    /// Adds `max_tokens` to a request body only when the user has set an
+    /// explicit ceiling (`llm_max_tokens`). Left unset, the server applies its
+    /// own default — the response length "inherits" from the service rather
+    /// than being forced here.
+    fn apply_max_tokens(&self, body: &mut serde_json::Value) {
+        if let Some(max) = self.config.max_tokens {
+            body["max_tokens"] = max.into();
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -47,7 +57,7 @@ impl Provider for OpenAiProvider {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let body = json!({
+        let mut body = json!({
             "model": self.config.model,
             "messages": [
                 { "role": "system", "content": system_prompt(context) },
@@ -62,6 +72,7 @@ impl Provider for OpenAiProvider {
                 },
             },
         });
+        self.apply_max_tokens(&mut body);
 
         let mut response = ureq::post(&url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
@@ -101,7 +112,7 @@ impl Provider for OpenAiProvider {
             json!({ "role": role, "content": turn.content })
         }));
 
-        let body = json!({
+        let mut body = json!({
             "model": self.config.model,
             "messages": messages,
             "response_format": {
@@ -113,6 +124,7 @@ impl Provider for OpenAiProvider {
                 },
             },
         });
+        self.apply_max_tokens(&mut body);
 
         let mut response = ureq::post(&url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
@@ -150,7 +162,7 @@ impl Provider for OpenAiProvider {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let body = json!({
+        let mut body = json!({
             "model": self.config.model,
             "messages": [
                 { "role": "system", "content": due_date_prompt(today) },
@@ -165,6 +177,7 @@ impl Provider for OpenAiProvider {
                 },
             },
         });
+        self.apply_max_tokens(&mut body);
 
         let mut response = ureq::post(&url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
@@ -187,5 +200,35 @@ impl Provider for OpenAiProvider {
         let raw: RawDueDate = serde_json::from_str(&content)
             .map_err(|e| format!("failed to parse date JSON: {e}"))?;
         raw.into_date()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::ProviderKind;
+
+    fn provider(max_tokens: Option<u32>) -> OpenAiProvider {
+        OpenAiProvider::new(LlmConfig {
+            provider: ProviderKind::OpenAi,
+            api_key: "sk-test".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            max_tokens,
+        })
+    }
+
+    #[test]
+    fn max_tokens_is_omitted_when_unset_so_the_service_decides() {
+        let mut body = json!({ "model": "gpt-4o-mini" });
+        provider(None).apply_max_tokens(&mut body);
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn max_tokens_is_sent_when_the_user_set_a_ceiling() {
+        let mut body = json!({ "model": "gpt-4o-mini" });
+        provider(Some(4096)).apply_max_tokens(&mut body);
+        assert_eq!(body["max_tokens"], json!(4096));
     }
 }

@@ -282,6 +282,12 @@ pub struct SettingsDraft {
     pub show_api_key: bool,
     pub llm_base_url: String,
     pub llm_model: String,
+    /// Optional per-response token ceiling, as raw text straight from the
+    /// field (so a half-typed value survives until Save). Blank means "let the
+    /// provider decide" — see `LlmConfig::max_tokens`. `save_settings` parses
+    /// and validates this; anything that isn't a positive integer is persisted
+    /// as blank.
+    pub llm_max_tokens: String,
     pub db_path: String,
     pub sync_folder_path: String,
     pub gcal_client_id: String,
@@ -378,6 +384,10 @@ impl SettingsDraft {
             show_api_key: false,
             llm_base_url: field("llm_base_url", current.map(|c| &c.base_url)),
             llm_model: field("llm_model", current.map(|c| &c.model)),
+            llm_max_tokens: non_blank("llm_max_tokens")
+                .map(str::to_string)
+                .or_else(|| current.and_then(|c| c.max_tokens).map(|n| n.to_string()))
+                .unwrap_or_default(),
             db_path: current_db_path(conn),
             sync_folder_path: settings
                 .get("sync_folder_path")
@@ -2071,11 +2081,22 @@ impl AppState {
             .gcal_refresh_minutes
             .clamp(calendar::MIN_REFRESH_MINUTES, calendar::MAX_REFRESH_MINUTES)
             .to_string();
+        // Anything that isn't a positive integer is stored as blank, so a
+        // typo can't quietly sit in the field being ignored on every load.
+        let llm_max_tokens = draft
+            .llm_max_tokens
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|&n| n > 0)
+            .map(|n| n.to_string())
+            .unwrap_or_default();
         let pairs = [
             ("llm_provider", provider),
             ("llm_api_key", draft.llm_api_key.trim()),
             ("llm_base_url", draft.llm_base_url.trim()),
             ("llm_model", draft.llm_model.trim()),
+            ("llm_max_tokens", llm_max_tokens.as_str()),
             ("sync_folder_path", draft.sync_folder_path.trim()),
             ("gcal_client_id", draft.gcal_client_id.trim()),
             ("gcal_client_secret", draft.gcal_client_secret.trim()),
@@ -4052,6 +4073,7 @@ mod tests {
             api_key: "sk-test".to_string(),
             base_url: "https://example.test".to_string(),
             model: "claude-test".to_string(),
+            max_tokens: None,
         });
 
         state.open_settings();
@@ -4100,6 +4122,27 @@ mod tests {
             saved.get("llm_api_key").map(String::as_str),
             Some("sk-live")
         );
+    }
+
+    #[test]
+    fn save_settings_validates_the_max_tokens_field() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.open_settings();
+        state.settings.as_mut().unwrap().llm_max_tokens = "  32000 ".to_string();
+        state.save_settings();
+        let saved = settings_repo::get_all(&state.conn).unwrap();
+        assert_eq!(
+            saved.get("llm_max_tokens").map(String::as_str),
+            Some("32000")
+        );
+
+        // A non-numeric value is stored as blank rather than lingering.
+        state.open_settings();
+        assert_eq!(state.settings.as_ref().unwrap().llm_max_tokens, "32000");
+        state.settings.as_mut().unwrap().llm_max_tokens = "lots".to_string();
+        state.save_settings();
+        let saved = settings_repo::get_all(&state.conn).unwrap();
+        assert_eq!(saved.get("llm_max_tokens").map(String::as_str), Some(""));
     }
 
     #[test]
@@ -4162,6 +4205,7 @@ mod tests {
             api_key: "sk-from-env".to_string(),
             base_url: "https://api.anthropic.com".to_string(),
             model: "claude-from-env".to_string(),
+            max_tokens: None,
         };
 
         let draft = SettingsDraft::load(&conn, Some(&live_config));

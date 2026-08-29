@@ -44,6 +44,7 @@ Configuration is via environment variables, optionally loaded from a `.env` file
 | `WU_WEI_LLM_API_KEY` | API key for AI features; overrides `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` |
 | `WU_WEI_LLM_BASE_URL` | Overrides the provider's default base URL (e.g. to point at a local OpenAI-compatible server) |
 | `WU_WEI_LLM_MODEL` | Overrides the provider's default model (`gpt-4o-mini` for OpenAI, `claude-opus-5` for Anthropic) |
+| `WU_WEI_LLM_MAX_TOKENS` | Optional cap on a single response's length; leave unset to use the provider's own limit |
 
 AI-assisted capture and chat are entirely optional — leave the LLM variables unset and those features are simply disabled. Everything can also be configured (and changed live) from the in-app Settings screen (`Cmd+,`), which takes priority over these environment variables. A sync folder is likewise configured there.
 
