@@ -46,13 +46,18 @@ impl eframe::App for WuWeiApp {
         self.state.poll_google_auth();
         self.state.poll_db_path_dialog();
         self.state.poll_sync_folder_dialog();
-        // The native file dialogs run on a background thread (see
-        // `AppState::browse_for_db_path`) so they don't freeze the window
-        // while open, but that means nothing else prompts a repaint when one
-        // resolves — without this, the picked path wouldn't show up in
-        // Settings until some unrelated input (e.g. a mouse move) happened
-        // to trigger the next frame.
-        if self.state.db_path_dialog.is_some() || self.state.sync_folder_dialog.is_some() {
+        // These run on background threads (native file dialogs — see
+        // `AppState::browse_for_db_path` — and `sync::run_async`) so they
+        // don't freeze the window, but that means nothing else prompts a
+        // repaint when one finishes. Without this poll, the resolved
+        // dialog path / the "Syncing..." status wouldn't update until some
+        // unrelated input (e.g. a mouse move) happened to trigger the next
+        // frame. The other background operations (LLM, chat, calendar)
+        // render a spinner while busy, which re-arms its own repaint.
+        if self.state.db_path_dialog.is_some()
+            || self.state.sync_folder_dialog.is_some()
+            || self.state.sync_busy
+        {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         ui::shortcuts::handle(&ctx, &mut self.state);
