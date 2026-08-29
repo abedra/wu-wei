@@ -1320,6 +1320,15 @@ impl AppState {
             .ok_or_else(|| "no task with that id".to_string())
     }
 
+    /// Number of tasks strictly overdue as of today — the working set a
+    /// `RescheduleOverdue` action operates on.
+    fn overdue_count(&self) -> Result<usize, String> {
+        let today = Local::now().date_naive();
+        task_repo::list_overdue(&self.conn, today)
+            .map(|tasks| tasks.len())
+            .map_err(|e| e.to_string())
+    }
+
     /// Read-only counterpart to `apply_chat_action`, used to build the
     /// confirmation preview in `receive_chat_reply` before the user has
     /// agreed to anything. Resolves and validates the same targets it does
@@ -1344,6 +1353,14 @@ impl AppState {
             ChatAction::SetDueDate { task_id, due_date } => {
                 let title = self.task_title(*task_id)?;
                 Ok(format!("set the due date on \"{title}\" to {due_date}"))
+            }
+            ChatAction::RescheduleOverdue { due_date } => {
+                let count = self.overdue_count()?;
+                if count == 0 {
+                    return Err("there are no overdue tasks to reschedule".to_string());
+                }
+                let noun = if count == 1 { "task" } else { "tasks" };
+                Ok(format!("move {count} overdue {noun} to {due_date}"))
             }
             ChatAction::ClearDueDate { task_id } => {
                 let title = self.task_title(*task_id)?;
@@ -1436,6 +1453,21 @@ impl AppState {
                 task_repo::set_due_date(&self.conn, task_id, Some(due_date))
                     .map_err(|e| e.to_string())?;
                 Ok(format!("set the due date on \"{title}\" to {due_date}"))
+            }
+            ChatAction::RescheduleOverdue { due_date } => {
+                let today = Local::now().date_naive();
+                let overdue =
+                    task_repo::list_overdue(&self.conn, today).map_err(|e| e.to_string())?;
+                if overdue.is_empty() {
+                    return Err("there are no overdue tasks to reschedule".to_string());
+                }
+                let count = overdue.len();
+                for task in &overdue {
+                    task_repo::set_due_date(&self.conn, task.id, Some(due_date))
+                        .map_err(|e| e.to_string())?;
+                }
+                let noun = if count == 1 { "task" } else { "tasks" };
+                Ok(format!("moved {count} overdue {noun} to {due_date}"))
             }
             ChatAction::ClearDueDate { task_id } => {
                 let title = self.task_title(task_id)?;
@@ -2410,6 +2442,77 @@ mod tests {
         assert!(state.pending_chat_actions.is_empty());
         let task = task_repo::get(&state.conn, task_id).unwrap().unwrap();
         assert_eq!(task.due_date, Some(today));
+    }
+
+    #[test]
+    fn chat_action_reschedule_overdue_moves_every_overdue_task_at_once() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        let today = Local::now().date_naive();
+
+        for (title, due) in [
+            ("way overdue", Some(today - Duration::days(10))),
+            ("just overdue", Some(today - Duration::days(1))),
+            ("due today", Some(today)),
+            ("no due date", None),
+        ] {
+            let mut task = Task::new_inbox(title);
+            task.due_date = due;
+            task_repo::create(&state.conn, &task).unwrap();
+        }
+
+        state.receive_chat_reply(ChatReply {
+            reply: "I'll roll your overdue tasks to today.".to_string(),
+            actions: vec![ChatAction::RescheduleOverdue { due_date: today }],
+            parse_failures: Vec::new(),
+        });
+
+        assert_eq!(state.pending_chat_actions.len(), 1);
+        assert!(
+            state.chat_history[0]
+                .content
+                .contains("move 2 overdue tasks to")
+        );
+
+        state.confirm_pending_chat_actions();
+
+        let by_title = |t: &str| {
+            task_repo::list_all(&state.conn)
+                .unwrap()
+                .into_iter()
+                .find(|task| task.title == t)
+                .unwrap()
+        };
+        assert_eq!(by_title("way overdue").due_date, Some(today));
+        assert_eq!(by_title("just overdue").due_date, Some(today));
+        assert_eq!(by_title("due today").due_date, Some(today));
+        assert_eq!(by_title("no due date").due_date, None);
+        assert!(
+            state
+                .chat_history
+                .last()
+                .unwrap()
+                .content
+                .contains("moved 2 overdue tasks to")
+        );
+    }
+
+    #[test]
+    fn chat_action_reschedule_overdue_with_nothing_overdue_is_reported_as_a_failure() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        let today = Local::now().date_naive();
+
+        state.receive_chat_reply(ChatReply {
+            reply: "I'll roll your overdue tasks to today.".to_string(),
+            actions: vec![ChatAction::RescheduleOverdue { due_date: today }],
+            parse_failures: Vec::new(),
+        });
+
+        assert!(state.pending_chat_actions.is_empty());
+        assert!(
+            state.chat_history[0]
+                .content
+                .contains("no overdue tasks to reschedule")
+        );
     }
 
     #[test]

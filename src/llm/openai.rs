@@ -30,6 +30,8 @@ struct ChatResponse {
 #[derive(Deserialize)]
 struct Choice {
     message: Message,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -120,13 +122,21 @@ impl Provider for OpenAiProvider {
             .read_json()
             .map_err(|e| format!("failed to read OpenAI-compatible response: {e}"))?;
 
-        let content = parsed
+        let choice = parsed
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| "OpenAI-compatible response had no choices".to_string())?
-            .message
-            .content;
+            .ok_or_else(|| "OpenAI-compatible response had no choices".to_string())?;
+
+        if choice.finish_reason.as_deref() == Some("length") {
+            return Err(
+                "the response was cut off before it finished (too many changes in one \
+                 request) — try asking for fewer at a time"
+                    .to_string(),
+            );
+        }
+
+        let content = choice.message.content;
 
         let raw: RawChatReply = serde_json::from_str(&content)
             .map_err(|e| format!("failed to parse chat reply JSON: {e}"))?;

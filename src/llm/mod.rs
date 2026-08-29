@@ -80,6 +80,14 @@ pub enum ChatAction {
         task_id: TaskId,
         due_date: NaiveDate,
     },
+    /// Move every currently-overdue task to `due_date` in one shot. The app
+    /// resolves the set itself (from `task_repo::list_overdue`) rather than
+    /// trusting the model to enumerate and transcribe one id per task — a
+    /// "roll all my overdue tasks to today" command otherwise routinely comes
+    /// back with only some of them.
+    RescheduleOverdue {
+        due_date: NaiveDate,
+    },
     ClearDueDate {
         task_id: TaskId,
     },

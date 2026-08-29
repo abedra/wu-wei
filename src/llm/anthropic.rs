@@ -28,6 +28,8 @@ impl AnthropicProvider {
 #[derive(Deserialize)]
 struct MessagesResponse {
     content: Vec<ContentBlock>,
+    #[serde(default)]
+    stop_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -91,9 +93,11 @@ impl Provider for AnthropicProvider {
 
         let body = json!({
             "model": self.config.model,
-            // Higher than the capture-parse call: a command like "roll all
-            // overdue tasks to today" can emit one action per task.
-            "max_tokens": 4096,
+            // Higher than the capture-parse call: a bulk command like
+            // "complete all my Errands tasks" emits one action per task, and a
+            // truncated response is unparsable JSON (or, worse, a silently
+            // short action list) — see the stop_reason check below.
+            "max_tokens": 16384,
             "system": chat_system_prompt(context),
             "messages": messages,
             "output_config": {
@@ -114,6 +118,14 @@ impl Provider for AnthropicProvider {
             .body_mut()
             .read_json()
             .map_err(|e| format!("failed to read Anthropic response: {e}"))?;
+
+        if parsed.stop_reason.as_deref() == Some("max_tokens") {
+            return Err(
+                "the response was cut off before it finished (too many changes in one \
+                 request) — try asking for fewer at a time"
+                    .to_string(),
+            );
+        }
 
         let content = parsed
             .content

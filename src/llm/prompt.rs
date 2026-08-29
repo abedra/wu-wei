@@ -269,6 +269,10 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
          Respond with a short, conversational reply for the user, plus a list of actions to \
          perform. Each action has a \"type\" of one of: set_due_date (task_id, due_date as \
          YYYY-MM-DD, resolving relative dates like \"today\"/\"tomorrow\" against today), \
+         reschedule_overdue (due_date as YYYY-MM-DD — moves every currently-overdue task to \
+         that date in a single action; the app works out which tasks those are itself. Use \
+         this, not a per-task set_due_date, for any \"roll/move/push all my overdue tasks to \
+         X\" command — leave task_id null), \
          clear_due_date (task_id), set_recurrence (task_id, recurrence — {{interval, unit}}; \
          makes an existing task repeat, or changes how often it already does), \
          clear_recurrence (task_id — makes an existing task stop repeating; it still keeps \
@@ -289,8 +293,9 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
          task_id that doesn't exist in the list above). create_project/delete_project/\
          create_task act on a project or a not-yet-existing task, so leave \
          task_id null for them; every other action, including delete_task, needs a task_id \
-         taken from the open-tasks list above. If a command implies several tasks \
-         (e.g. \"all overdue tasks\"), emit one action per matching task. If no task/project \
+         taken from the open-tasks list above. If a command implies several tasks, emit one \
+         action per matching task — except rescheduling every overdue task, which has its own \
+         single reschedule_overdue action (above). If no task/project \
          clearly matches what a command describes, that's the same kind of uncertainty as \
          above — ask for confirmation rather than guessing which one was meant. Every field \
          an action's type needs (see above) must actually be filled in with a real value, \
@@ -325,7 +330,8 @@ pub fn chat_response_schema() -> Value {
                         "type": {
                             "type": "string",
                             "enum": [
-                                "set_due_date", "clear_due_date", "set_recurrence",
+                                "set_due_date", "reschedule_overdue", "clear_due_date",
+                                "set_recurrence",
                                 "clear_recurrence", "complete_task", "reopen_task",
                                 "move_to_project", "move_to_inbox",
                                 "create_project", "delete_project",
@@ -494,6 +500,9 @@ impl RawChatAction {
             "set_due_date" => Ok(ChatAction::SetDueDate {
                 task_id: parse_required_task_id("set_due_date", self.task_id)?,
                 due_date: parse_required_due_date("set_due_date", self.due_date)?,
+            }),
+            "reschedule_overdue" => Ok(ChatAction::RescheduleOverdue {
+                due_date: parse_required_due_date("reschedule_overdue", self.due_date)?,
             }),
             "clear_due_date" => Ok(ChatAction::ClearDueDate {
                 task_id: parse_required_task_id("clear_due_date", self.task_id)?,
@@ -717,6 +726,27 @@ mod tests {
                 due_date: NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(),
             }
         );
+    }
+
+    #[test]
+    fn parses_a_reschedule_overdue_action() {
+        let mut raw = project_chat_action("reschedule_overdue");
+        raw.due_date = Some("2026-08-28".to_string());
+        let action = raw.into_chat_action().unwrap();
+        assert_eq!(
+            action,
+            ChatAction::RescheduleOverdue {
+                due_date: NaiveDate::from_ymd_opt(2026, 8, 28).unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_a_reschedule_overdue_action_missing_a_date() {
+        let err = project_chat_action("reschedule_overdue")
+            .into_chat_action()
+            .unwrap_err();
+        assert!(err.contains("missing a due_date"));
     }
 
     #[test]
