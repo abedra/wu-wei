@@ -37,6 +37,7 @@ impl eframe::App for WuWeiApp {
         ctx.request_repaint_after(std::time::Duration::from_secs(300));
         self.state.refresh_if_date_changed();
         self.state.poll_llm();
+        self.state.poll_due_date_picker();
         self.state.poll_chat();
         self.state.poll_sync();
         self.state.maybe_auto_sync();

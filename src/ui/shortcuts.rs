@@ -295,9 +295,21 @@ fn handle_project_picker(ctx: &egui::Context, state: &mut AppState) {
 
 /// `D` opens a keyboard-driven due-date picker for the highlighted task, with
 /// quick relative options (Today, Tomorrow, This Weekend, Next Week, or no
-/// date). Same open/navigate/confirm/cancel shape as [`handle_project_picker`].
+/// date) plus a free-text field for a typed phrase resolved by AI. Same
+/// open/navigate/confirm/cancel shape as [`handle_project_picker`].
 fn handle_due_date_picker(ctx: &egui::Context, state: &mut AppState) {
     if state.due_date_picker.is_some() {
+        // Escape always bails, even mid-resolve.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            state.close_due_date_picker();
+            return;
+        }
+        // While the typed phrase is being resolved, or while the text field
+        // has keyboard focus, the option list doesn't own the arrows/Enter —
+        // the field does (its own Enter-submit lives in `ui::due_date_picker`).
+        if state.due_date_picker_ai_busy() || ctx.memory(|m| m.focused()).is_some() {
+            return;
+        }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
             state.move_due_date_picker_highlight(1);
         }
@@ -306,9 +318,6 @@ fn handle_due_date_picker(ctx: &egui::Context, state: &mut AppState) {
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
             state.confirm_due_date_picker();
-        }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-            state.close_due_date_picker();
         }
         return;
     }

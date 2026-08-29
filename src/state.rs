@@ -92,6 +92,17 @@ pub struct ProjectPickerState {
 pub struct DueDatePickerState {
     pub task_id: TaskId,
     pub highlighted: usize,
+    /// The free-text "type a date" field (e.g. "next friday", "in 3 weeks"),
+    /// resolved to a real date by the LLM — see
+    /// `AppState::submit_due_date_picker_text`.
+    pub text_input: String,
+    /// Set while the typed phrase is being resolved on a background thread;
+    /// polled in `AppState::poll_due_date_picker`. Dropping the picker (e.g.
+    /// Esc) drops this and abandons the in-flight request.
+    pub ai_pending: Option<Receiver<Result<NaiveDate, String>>>,
+    /// The last typed-date attempt's failure ("couldn't read a date from
+    /// that", no provider configured, ...), shown inline in the picker.
+    pub ai_error: Option<String>,
 }
 
 /// The next Saturday from `today`, or `today` itself if it's already a
@@ -2011,11 +2022,22 @@ impl AppState {
         self.due_date_picker = Some(DueDatePickerState {
             task_id,
             highlighted,
+            text_input: String::new(),
+            ai_pending: None,
+            ai_error: None,
         });
     }
 
     pub fn close_due_date_picker(&mut self) {
         self.due_date_picker = None;
+    }
+
+    /// Whether the due-date picker is waiting on the LLM to resolve a typed
+    /// phrase — the UI/shortcut layer freezes the option list while it is.
+    pub fn due_date_picker_ai_busy(&self) -> bool {
+        self.due_date_picker
+            .as_ref()
+            .is_some_and(|p| p.ai_pending.is_some())
     }
 
     pub fn move_due_date_picker_highlight(&mut self, delta: i32) {
@@ -2024,6 +2046,67 @@ impl AppState {
         };
         let max = due_date_picker_options(Local::now().date_naive()).len() as i32 - 1;
         picker.highlighted = (picker.highlighted as i32 + delta).clamp(0, max) as usize;
+    }
+
+    /// Enter in the picker's free-text field: resolves the typed phrase to a
+    /// real date via the LLM on a background thread. A no-op when the field
+    /// is blank; sets `ai_error` (rather than starting a request) when no LLM
+    /// provider is configured.
+    pub fn submit_due_date_picker_text(&mut self) {
+        let Some(picker) = &mut self.due_date_picker else {
+            return;
+        };
+        if picker.ai_pending.is_some() {
+            return;
+        }
+        let text = picker.text_input.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let Some(config) = self.llm_config.clone() else {
+            picker.ai_error = Some(
+                "Typing a date needs an AI provider — set one up in Settings, or pick an \
+                 option above."
+                    .to_string(),
+            );
+            return;
+        };
+        picker.ai_error = None;
+        picker.ai_pending = Some(llm::parse_due_date_async(
+            config,
+            text,
+            Local::now().date_naive(),
+        ));
+    }
+
+    /// Polled once per frame from `app.rs`. Non-blocking: does nothing while
+    /// the background date-parse request is still running.
+    pub fn poll_due_date_picker(&mut self) {
+        let Some(picker) = &self.due_date_picker else {
+            return;
+        };
+        let Some(rx) = &picker.ai_pending else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(date)) => {
+                let task_id = picker.task_id;
+                self.due_date_picker = None;
+                self.set_task_due_date(task_id, Some(date));
+            }
+            Ok(Err(e)) => {
+                if let Some(picker) = &mut self.due_date_picker {
+                    picker.ai_pending = None;
+                    picker.ai_error = Some(e);
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                if let Some(picker) = &mut self.due_date_picker {
+                    picker.ai_pending = None;
+                }
+            }
+        }
     }
 
     /// Confirms the picker's currently highlighted row.
@@ -2047,8 +2130,13 @@ impl AppState {
         let Some((_, due_date)) = options.get(index) else {
             return;
         };
-        let due_date = *due_date;
+        self.set_task_due_date(task_id, *due_date);
+    }
 
+    /// Writes `due_date` (`None` clears it) onto `task_id`, whether it's
+    /// currently open in the detail editor or only in the list — the shared
+    /// tail of both the quick-option picker and its typed-date field.
+    fn set_task_due_date(&mut self, task_id: TaskId, due_date: Option<NaiveDate>) {
         if let Some(buf) = &mut self.task_edit_buffer
             && buf.id == task_id
         {
@@ -3392,6 +3480,85 @@ mod tests {
         let expected = Local::now().date_naive() + Duration::days(1);
         let updated = task_repo::get(&state.conn, task_id).unwrap().unwrap();
         assert_eq!(updated.due_date, Some(expected));
+    }
+
+    #[test]
+    fn submit_due_date_picker_text_without_a_provider_sets_an_inline_error() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.llm_config = None;
+        state.quick_entry_buffer = "renew passport".to_string();
+        state.quick_capture_submit();
+        state.move_highlight(1);
+        state.open_due_date_picker();
+
+        state.due_date_picker.as_mut().unwrap().text_input = "next friday".to_string();
+        state.submit_due_date_picker_text();
+
+        let picker = state.due_date_picker.as_ref().unwrap();
+        assert!(picker.ai_pending.is_none());
+        assert!(picker.ai_error.as_deref().unwrap().contains("AI provider"));
+    }
+
+    #[test]
+    fn submit_due_date_picker_text_is_a_noop_when_the_field_is_blank() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "renew passport".to_string();
+        state.quick_capture_submit();
+        state.move_highlight(1);
+        state.open_due_date_picker();
+
+        state.due_date_picker.as_mut().unwrap().text_input = "   ".to_string();
+        state.submit_due_date_picker_text();
+
+        let picker = state.due_date_picker.as_ref().unwrap();
+        assert!(picker.ai_pending.is_none());
+        assert!(picker.ai_error.is_none());
+    }
+
+    #[test]
+    fn poll_due_date_picker_applies_a_resolved_date_and_closes_the_picker() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "renew passport".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        state.move_highlight(1);
+        state.open_due_date_picker();
+
+        // Stand in for the background LLM thread: hand the picker a channel
+        // that already carries a resolved date.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let resolved = Local::now().date_naive() + Duration::days(9);
+        tx.send(Ok(resolved)).unwrap();
+        state.due_date_picker.as_mut().unwrap().ai_pending = Some(rx);
+
+        state.poll_due_date_picker();
+
+        assert!(state.due_date_picker.is_none());
+        let updated = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert_eq!(updated.due_date, Some(resolved));
+    }
+
+    #[test]
+    fn poll_due_date_picker_keeps_the_picker_open_and_shows_a_parse_failure() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "renew passport".to_string();
+        state.quick_capture_submit();
+        state.move_highlight(1);
+        state.open_due_date_picker();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Err("couldn't read a date from that".to_string()))
+            .unwrap();
+        state.due_date_picker.as_mut().unwrap().ai_pending = Some(rx);
+
+        state.poll_due_date_picker();
+
+        let picker = state.due_date_picker.as_ref().unwrap();
+        assert!(picker.ai_pending.is_none());
+        assert_eq!(
+            picker.ai_error.as_deref(),
+            Some("couldn't read a date from that")
+        );
     }
 
     #[test]

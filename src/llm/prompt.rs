@@ -100,6 +100,60 @@ pub fn system_prompt(context: &PromptContext) -> String {
     )
 }
 
+/// System prompt for the due-date picker's free-text field (see
+/// `ui::due_date_picker`): the model's whole job is to turn one short phrase
+/// into a single calendar date. Deliberately narrow — no title/project/
+/// recurrence extraction, unlike `system_prompt`.
+pub fn due_date_prompt(today: NaiveDate) -> String {
+    format!(
+        "The user typed a short phrase naming a single due date — e.g. \"next friday\", \
+         \"in 3 weeks\", \"end of the month\", \"aug 30\", \"the 15th\". Resolve it to one \
+         calendar date and reply with {{\"due_date\": \"YYYY-MM-DD\"}}. Today is {today} \
+         ({today_weekday}). For relative or named-weekday phrases within the next week, use \
+         this lookup instead of computing weekdays yourself: {weekdays}. Resolve anything \
+         further out by counting from today (\"in 3 weeks\" is today + 21 days; \"next \
+         month\" is the same day-of-month next month, clamped to that month's last day). A \
+         bare weekday, month/day, or day-of-month that has already passed means the next \
+         upcoming one, never a past date. If the phrase names no date at all, reply with \
+         {{\"due_date\": null}}.",
+        today = today.format("%Y-%m-%d"),
+        today_weekday = today.format("%A"),
+        weekdays = weekday_reference(today),
+    )
+}
+
+/// JSON Schema for `due_date_prompt`'s reply: a single nullable date string.
+pub fn due_date_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "due_date": { "anyOf": [{ "type": "string" }, { "type": "null" }] }
+        },
+        "required": ["due_date"],
+        "additionalProperties": false
+    })
+}
+
+#[derive(Deserialize)]
+pub struct RawDueDate {
+    pub due_date: Option<String>,
+}
+
+impl RawDueDate {
+    /// `null`/blank means the model couldn't read a date out of the phrase —
+    /// surfaced to the user as a "didn't understand that" message, not a
+    /// hard error.
+    pub fn into_date(self) -> Result<NaiveDate, String> {
+        let s = self
+            .due_date
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "couldn't read a date from that".to_string())?;
+        NaiveDate::parse_from_str(&s, "%Y-%m-%d")
+            .map_err(|e| format!("model returned an unparsable date {s:?}: {e}"))
+    }
+}
+
 /// The `recurrence` field's JSON Schema — shared between `response_schema`
 /// (quick capture) and `chat_response_schema` (create_task), since both
 /// accept the same `{interval, unit}` shape.
@@ -1144,5 +1198,52 @@ mod tests {
             .into_chat_action()
             .unwrap_err();
         assert!(err.contains("missing a title"));
+    }
+
+    #[test]
+    fn raw_due_date_parses_a_valid_iso_date() {
+        let raw = RawDueDate {
+            due_date: Some("2026-09-04".to_string()),
+        };
+        assert_eq!(
+            raw.into_date().unwrap(),
+            NaiveDate::from_ymd_opt(2026, 9, 4).unwrap()
+        );
+    }
+
+    #[test]
+    fn raw_due_date_treats_null_or_blank_as_unreadable() {
+        assert!(
+            RawDueDate { due_date: None }
+                .into_date()
+                .unwrap_err()
+                .contains("couldn't read a date")
+        );
+        assert!(
+            RawDueDate {
+                due_date: Some("  ".to_string()),
+            }
+            .into_date()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn raw_due_date_rejects_a_non_date_string() {
+        let err = RawDueDate {
+            due_date: Some("sometime soon".to_string()),
+        }
+        .into_date()
+        .unwrap_err();
+        assert!(err.contains("unparsable date"));
+    }
+
+    #[test]
+    fn due_date_prompt_includes_today_and_the_weekday_lookup() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
+        let prompt = due_date_prompt(today);
+        assert!(prompt.contains("Today is 2026-08-19 (Wednesday)"));
+        assert!(prompt.contains("Wednesday=2026-08-19 (today)"));
+        assert!(prompt.contains("\"due_date\": null"));
     }
 }

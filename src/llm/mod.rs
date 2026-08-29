@@ -162,6 +162,9 @@ pub struct ChatReply {
 trait Provider: Send {
     fn parse(&self, raw_text: &str, context: &PromptContext) -> Result<ParsedTask, String>;
     fn chat(&self, history: &[ChatTurn], context: &ChatContext) -> Result<ChatReply, String>;
+    /// Resolves a short free-text phrase ("next friday", "in 3 weeks") to a
+    /// single calendar date — the due-date picker's typed-input field.
+    fn parse_due_date(&self, text: &str, today: NaiveDate) -> Result<NaiveDate, String>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +249,23 @@ pub fn parse_capture_async(
         let provider = config.build_provider();
         let result = provider.parse(&raw_text, &context);
         let _ = tx.send(result);
+    });
+    rx
+}
+
+/// Spawns a background thread that resolves a free-text date phrase (from
+/// the due-date picker's input field) to a single [`NaiveDate`], delivering
+/// the result over the returned channel. Polled once per frame, same as
+/// [`parse_capture_async`].
+pub fn parse_due_date_async(
+    config: LlmConfig,
+    text: String,
+    today: NaiveDate,
+) -> Receiver<Result<NaiveDate, String>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let provider = config.build_provider();
+        let _ = tx.send(provider.parse_due_date(&text, today));
     });
     rx
 }

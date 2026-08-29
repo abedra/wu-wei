@@ -9,6 +9,7 @@ Wu Wei stores tasks and projects in a local SQLite database, offers AI-assisted 
 - **GTD-style perspectives** — Inbox, Today, Overdue, Completed, and per-project views.
 - **Keyboard-first workflow** — nearly everything (navigation, capture, moving tasks, due dates, completing, deleting) is reachable without the mouse. See [Keyboard shortcuts](#keyboard-shortcuts).
 - **Quick capture** — jot a task in plain English; with AI configured, it's parsed into a title, due date, project, and recurrence automatically.
+- **Due dates in plain English** — the Set Due Date picker (`D`) keeps its quick options (Today, Tomorrow, This Weekend, …) and adds a field where, with AI configured, you can type a phrase like "next friday" or "in 3 weeks" and have it resolved to a date.
 - **AI chat assistant** — a bottom panel where you can ask things like "roll all of my overdue tasks to today" and have it act directly on your tasks and projects.
 - **Recurring tasks** — completing a repeating task spawns its next occurrence automatically.
 - **Multi-device sync** — an optional, folder-based sync with last-write-wins merging and tombstone-based deletes; no server required.

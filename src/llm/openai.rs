@@ -1,9 +1,11 @@
 use serde::Deserialize;
 use serde_json::json;
 
+use chrono::NaiveDate;
+
 use super::prompt::{
-    RawChatReply, RawExtraction, chat_response_schema, chat_system_prompt, response_schema,
-    system_prompt,
+    RawChatReply, RawDueDate, RawExtraction, chat_response_schema, chat_system_prompt,
+    due_date_prompt, due_date_schema, response_schema, system_prompt,
 };
 use super::{
     ChatContext, ChatReply, ChatRole, ChatTurn, LlmConfig, ParsedTask, PromptContext, Provider,
@@ -141,5 +143,49 @@ impl Provider for OpenAiProvider {
         let raw: RawChatReply = serde_json::from_str(&content)
             .map_err(|e| format!("failed to parse chat reply JSON: {e}"))?;
         Ok(raw.into_chat_reply(&context.project_names))
+    }
+
+    fn parse_due_date(&self, text: &str, today: NaiveDate) -> Result<NaiveDate, String> {
+        let url = format!(
+            "{}/chat/completions",
+            self.config.base_url.trim_end_matches('/')
+        );
+        let body = json!({
+            "model": self.config.model,
+            "messages": [
+                { "role": "system", "content": due_date_prompt(today) },
+                { "role": "user", "content": text },
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "due_date",
+                    "strict": true,
+                    "schema": due_date_schema(),
+                },
+            },
+        });
+
+        let mut response = ureq::post(&url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .send_json(&body)
+            .map_err(|e| format!("OpenAI-compatible request failed: {e}"))?;
+
+        let parsed: ChatResponse = response
+            .body_mut()
+            .read_json()
+            .map_err(|e| format!("failed to read OpenAI-compatible response: {e}"))?;
+
+        let content = parsed
+            .choices
+            .into_iter()
+            .next()
+            .ok_or_else(|| "OpenAI-compatible response had no choices".to_string())?
+            .message
+            .content;
+
+        let raw: RawDueDate = serde_json::from_str(&content)
+            .map_err(|e| format!("failed to parse date JSON: {e}"))?;
+        raw.into_date()
     }
 }

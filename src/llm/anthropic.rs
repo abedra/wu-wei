@@ -1,9 +1,10 @@
+use chrono::NaiveDate;
 use serde::Deserialize;
 use serde_json::json;
 
 use super::prompt::{
-    RawChatReply, RawExtraction, chat_response_schema, chat_system_prompt, response_schema,
-    system_prompt,
+    RawChatReply, RawDueDate, RawExtraction, chat_response_schema, chat_system_prompt,
+    due_date_prompt, due_date_schema, response_schema, system_prompt,
 };
 use super::{
     ChatContext, ChatReply, ChatRole, ChatTurn, LlmConfig, ParsedTask, PromptContext, Provider,
@@ -136,5 +137,44 @@ impl Provider for AnthropicProvider {
         let raw: RawChatReply = serde_json::from_str(&content)
             .map_err(|e| format!("failed to parse chat reply JSON: {e}"))?;
         Ok(raw.into_chat_reply(&context.project_names))
+    }
+
+    fn parse_due_date(&self, text: &str, today: NaiveDate) -> Result<NaiveDate, String> {
+        let url = format!("{}/v1/messages", self.config.base_url.trim_end_matches('/'));
+        let body = json!({
+            "model": self.config.model,
+            "max_tokens": 256,
+            "system": due_date_prompt(today),
+            "messages": [
+                { "role": "user", "content": text },
+            ],
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "schema": due_date_schema(),
+                },
+            },
+        });
+
+        let mut response = ureq::post(&url)
+            .header("x-api-key", &self.config.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .send_json(&body)
+            .map_err(|e| format!("Anthropic request failed: {e}"))?;
+
+        let parsed: MessagesResponse = response
+            .body_mut()
+            .read_json()
+            .map_err(|e| format!("failed to read Anthropic response: {e}"))?;
+
+        let content = parsed
+            .content
+            .into_iter()
+            .find_map(|block| block.text)
+            .ok_or_else(|| "Anthropic response had no text content".to_string())?;
+
+        let raw: RawDueDate = serde_json::from_str(&content)
+            .map_err(|e| format!("failed to parse date JSON: {e}"))?;
+        raw.into_date()
     }
 }
