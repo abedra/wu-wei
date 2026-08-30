@@ -1,6 +1,6 @@
 [package]
 name = "wu-wei"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A GTD-style task manager with AI-assisted capture and folder-based sync"
 authors = ["Aaron Bedra <aaron@aaronbedra.com>"]
@@ -48,20 +48,40 @@ over a shared folder. Works fully offline.\
 # Wayland/X11 client libs, so dpkg-shlibdeps ($auto) never sees them.
 depends = "$auto, libgl1, libegl1, libxkbcommon0, libwayland-client0, libx11-6"
 assets = [
-    ["target/release/wu-wei", "usr/bin/", "755"],
-    ["packaging/linux/wu-wei.desktop", "usr/share/applications/", "644"],
-    ["dist/wu-wei.png", "usr/share/icons/hicolor/256x256/apps/wu-wei.png", "644"],
-    ["README.md", "usr/share/doc/wu-wei/README.md", "644"],
-    ["LICENSE", "usr/share/doc/wu-wei/LICENSE", "644"],
+  [
+    "target/release/wu-wei",
+    "usr/bin/",
+    "755",
+  ],
+  [
+    "packaging/linux/wu-wei.desktop",
+    "usr/share/applications/",
+    "644",
+  ],
+  [
+    "dist/wu-wei.png",
+    "usr/share/icons/hicolor/256x256/apps/wu-wei.png",
+    "644",
+  ],
+  [
+    "README.md",
+    "usr/share/doc/wu-wei/README.md",
+    "644",
+  ],
+  [
+    "LICENSE",
+    "usr/share/doc/wu-wei/LICENSE",
+    "644",
+  ],
 ]
 
 [package.metadata.generate-rpm]
 assets = [
-    { source = "target/release/wu-wei", dest = "/usr/bin/wu-wei", mode = "755" },
-    { source = "packaging/linux/wu-wei.desktop", dest = "/usr/share/applications/wu-wei.desktop", mode = "644" },
-    { source = "dist/wu-wei.png", dest = "/usr/share/icons/hicolor/256x256/apps/wu-wei.png", mode = "644" },
-    { source = "README.md", dest = "/usr/share/doc/wu-wei/README.md", mode = "644" },
-    { source = "LICENSE", dest = "/usr/share/licenses/wu-wei/LICENSE", mode = "644" },
+  { source = "target/release/wu-wei", dest = "/usr/bin/wu-wei", mode = "755" },
+  { source = "packaging/linux/wu-wei.desktop", dest = "/usr/share/applications/wu-wei.desktop", mode = "644" },
+  { source = "dist/wu-wei.png", dest = "/usr/share/icons/hicolor/256x256/apps/wu-wei.png", mode = "644" },
+  { source = "README.md", dest = "/usr/share/doc/wu-wei/README.md", mode = "644" },
+  { source = "LICENSE", dest = "/usr/share/licenses/wu-wei/LICENSE", mode = "644" },
 ]
 
 [package.metadata.generate-rpm.requires]
