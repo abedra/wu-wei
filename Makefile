@@ -7,7 +7,7 @@ ifneq (,$(wildcard ./.env))
     export
 endif
 
-.PHONY: help doctor run build release install-desktop emit-icons package-linux test fmt fmt-check clippy check clean
+.PHONY: help doctor run build release install-desktop emit-icons package-linux test fmt fmt-check clippy check clean bump
 
 help:
 	@echo "wu-wei — available targets:"
@@ -24,6 +24,7 @@ help:
 	@echo "  clippy          run clippy lints (all targets)"
 	@echo "  check           fmt-check + clippy + test"
 	@echo "  clean           cargo clean"
+	@echo "  bump            bump version + sync Cargo.lock + commit + tag (V=0.1.4 or V=patch|minor|major, PUSH=1 to push)"
 
 ## Verifies the toolchain this project needs is on PATH:
 ##   - cargo/rustc (edition 2024 requires rustc >= 1.85)
@@ -80,3 +81,14 @@ check: fmt-check clippy test
 
 clean:
 	cargo clean
+
+## Cuts a release: rewrites the version in Cargo.toml, syncs Cargo.lock so
+## `cargo build --locked` stays green, then commits and tags "vX.Y.Z". Pushing
+## that tag triggers .github/workflows/release.yml. Nothing is pushed unless
+## PUSH=1. Examples:
+##   make bump V=0.1.4
+##   make bump V=patch
+##   make bump V=minor PUSH=1
+bump:
+	@test -n "$(V)" || { echo "usage: make bump V=<X.Y.Z|patch|minor|major> [PUSH=1]"; exit 2; }
+	@scripts/bump-version.sh "$(V)" $(if $(PUSH),--push,)
