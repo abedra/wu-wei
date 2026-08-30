@@ -31,7 +31,15 @@ cd wu-wei
 make run
 ```
 
-This builds and launches the app with `cargo run`, opening (and creating, if needed) `wu_wei.db` in the current directory.
+This builds and launches the app with `cargo run`. On first launch it creates an application data directory and puts its SQLite database (`wu_wei.db`) there:
+
+| OS | Location |
+| --- | --- |
+| Linux | `$XDG_DATA_HOME/wu-wei/` (default `~/.local/share/wu-wei/`) |
+| macOS | `~/Library/Application Support/wu-wei/` |
+| Windows | `%APPDATA%\wu-wei\` (default `C:\Users\<you>\AppData\Roaming\wu-wei\`) |
+
+If a `wu_wei.db` from an older version is found in the current directory, it's moved into this directory automatically. Set `WU_WEI_DB_PATH` or the in-app Settings to use a different location.
 
 ### Configuration
 
@@ -39,7 +47,7 @@ Configuration is via environment variables, optionally loaded from a `.env` file
 
 | Variable | Purpose |
 | --- | --- |
-| `WU_WEI_DB_PATH` | Path to the SQLite database file (default: `wu_wei.db`) |
+| `WU_WEI_DB_PATH` | Path to the SQLite database file (default: `wu_wei.db` in the per-OS application data directory — see [Getting started](#getting-started)) |
 | `WU_WEI_LLM_PROVIDER` | `openai` (default) or `anthropic` |
 | `WU_WEI_LLM_API_KEY` | API key for AI features; overrides `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` |
 | `WU_WEI_LLM_BASE_URL` | Overrides the provider's default base URL (e.g. to point at a local OpenAI-compatible server) |

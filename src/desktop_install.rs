@@ -70,11 +70,12 @@ fn run_macos(exe: &str) {
     fs::write(bundle.join("Contents/Info.plist"), plist).expect("failed to write Info.plist");
 
     // A bundle launched from Finder/Dock starts with its working directory at
-    // `/`, so the default relative `wu_wei.db` would resolve to an unwritable
-    // `/wu_wei.db` and the app would panic before showing a window. Pin the
-    // database to an absolute path at install time — resolved the same way the
-    // app does, made absolute against the install-time directory — so the
-    // installed app opens the very database you were running from. A path later
+    // `/`. The default database path is now absolute (it lives in a per-OS
+    // data directory — see `db_bootstrap::data_dir`), so that alone no longer
+    // breaks the app. But pin the resolved path into the launcher anyway, made
+    // absolute against the install-time directory, so that if you were running
+    // from a relative `wu_wei.db` in some project folder, the installed app
+    // still opens that same database rather than a fresh one. A path later
     // chosen in Settings still wins at runtime (it takes priority over this).
     let db_path = crate::db_bootstrap::resolve_db_path();
     let db_abs = {
@@ -147,13 +148,11 @@ fn run_windows(exe: &str) {
     let icon_path = icon_dir.join(format!("{APP_ID}.ico"));
     fs::write(&icon_path, icon::enso_ico(theme::ACCENT)).expect("failed to write .ico file");
 
-    // A shortcut with no working directory set launches with an arbitrary
-    // (often unwritable, e.g. System32) cwd, so the default relative
-    // `wu_wei.db` fails to open and the app panics before showing a window —
-    // the same class of bug `run_macos` works around by pinning an absolute
-    // db path into its launcher shim. Shortcuts carry a working directory
-    // natively, so pinning it to the install-time directory (where the
-    // existing relative `wu_wei.db` already lives) is enough here.
+    // The default database path is absolute now (a per-OS data directory —
+    // see `db_bootstrap::data_dir`), so a shortcut launching with an
+    // arbitrary cwd no longer breaks a fresh install. Still, pin the working
+    // directory to the install-time directory so that if a relative
+    // `wu_wei.db` was in use there, the installed shortcut keeps opening it.
     let working_dir = std::env::current_dir()
         .expect("failed to resolve current directory")
         .to_string_lossy()

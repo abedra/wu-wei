@@ -12,6 +12,18 @@ use error::DbResult;
 const SCHEMA_SQL: &str = include_str!("schema.sql");
 
 pub fn open(path: impl AsRef<Path>) -> DbResult<Connection> {
+    let path = path.as_ref();
+    // The default database lives in a per-OS data directory that may not
+    // exist yet on a fresh install (see `db_bootstrap::data_dir`), and a
+    // path chosen in Settings can name a not-yet-created folder too.
+    // `Connection::open` won't create missing parents, so do it here. The
+    // emptiness guard skips `:memory:` and bare-filename paths, whose
+    // `parent()` is `Some("")`.
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "foreign_keys", true)?;
     // A background sync thread opens its own connection to this same file
