@@ -5,8 +5,8 @@ edition = "2024"
 description = "A GTD-style task manager with AI-assisted capture and folder-based sync"
 authors = ["Aaron Bedra <aaron@aaronbedra.com>"]
 license = "LicenseRef-proprietary"
-repository = "https://github.com/abedra/wei-wu"
-homepage = "https://github.com/abedra/wei-wu"
+repository = "https://github.com/abedra/wu-wei"
+homepage = "https://github.com/abedra/wu-wei"
 publish = false
 
 [dependencies]

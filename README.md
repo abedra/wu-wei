@@ -19,7 +19,7 @@ Wu Wei stores tasks and projects in a local SQLite database, offers AI-assisted 
 ## Installation
 
 Each tagged release publishes an installer per OS on the
-[Releases](https://github.com/abedra/wei-wu/releases) page:
+[Releases](https://github.com/abedra/wu-wei/releases) page:
 
 | OS | Download | Install |
 | --- | --- | --- |
