@@ -84,18 +84,29 @@ jobs:
         shell: pwsh
         run: |
           choco install nsis -y --no-progress
-          "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Append
+          $nsis = "C:\Program Files (x86)\NSIS"
+          if (-not (Test-Path "$nsis\makensis.exe")) { $nsis = "C:\Program Files\NSIS" }
+          if (-not (Test-Path "$nsis\makensis.exe")) { throw "makensis.exe not found after install" }
+          "$nsis" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding ascii
+          & "$nsis\makensis.exe" /VERSION
       - name: Package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          .\target\release\wu-wei.exe emit-icons dist
+          $ws = $env:GITHUB_WORKSPACE
+          New-Item -ItemType Directory -Force -Path "$ws\dist" | Out-Null
+          & "$ws\target\release\wu-wei.exe" emit-icons "$ws\dist"
           $v = "${{ needs.version.outputs.version }}"
-          makensis /DVERSION=$v `
-            /DSRCDIR=target\release `
-            /DICON=dist\wu-wei.ico `
-            /DOUTFILE=dist\Wu-Wei-Setup-$v.exe `
-            packaging\windows\installer.nsi
+          $m = [regex]::Match($v, '^\d+\.\d+\.\d+')
+          $viv = if ($m.Success) { "$($m.Value).0" } else { "0.0.0.0" }
+          makensis /V3 `
+            /DVERSION=$v `
+            /DVIVERSION=$viv `
+            /DSRCDIR=$ws\target\release `
+            /DICON=$ws\dist\wu-wei.ico `
+            /DOUTFILE=$ws\dist\Wu-Wei-Setup-$v.exe `
+            $ws\packaging\windows\installer.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
+          Get-ChildItem "$ws\dist"
       - uses: actions/upload-artifact@v4
         with:
           name: windows

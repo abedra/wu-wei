@@ -1,7 +1,7 @@
 ; NSIS installer for Wu Wei (per-machine).
 ;
 ; Built by the release workflow (.github/workflows/release.yml) with:
-;   makensis /DVERSION=X.Y.Z /DSRCDIR=<dir with wu-wei.exe> \
+;   makensis /DVERSION=X.Y.Z /DVIVERSION=X.Y.Z.0 /DSRCDIR=<dir with wu-wei.exe>
 ;            /DICON=<wu-wei.ico> /DOUTFILE=<setup exe> installer.nsi
 ; Every /D has a default below so `makensis installer.nsi` also works from a
 ; local checkout after `cargo build --release` + `wu-wei emit-icons dist`.
@@ -10,6 +10,9 @@ Unicode true
 
 !ifndef VERSION
   !define VERSION "0.0.0"
+!endif
+!ifndef VIVERSION
+  !define VIVERSION "0.0.0.0"
 !endif
 !ifndef SRCDIR
   !define SRCDIR "..\..\target\release"
@@ -33,7 +36,7 @@ InstallDirRegKey HKLM "Software\${APPNAME}" "InstallDir"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 
-VIProductVersion "${VERSION}.0"
+VIProductVersion "${VIVERSION}"
 VIAddVersionKey "ProductName" "${APPNAME}"
 VIAddVersionKey "CompanyName" "${COMPANY}"
 VIAddVersionKey "FileDescription" "${APPNAME} installer"
@@ -43,6 +46,7 @@ VIAddVersionKey "LegalCopyright" "(c) ${COMPANY}"
 
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
+!insertmacro GetSize
 
 !define MUI_ICON "${ICON}"
 !define MUI_UNICON "${ICON}"
@@ -68,8 +72,7 @@ Section "${APPNAME} (required)" SecCore
   File "/oname=${SLUG}.ico" "${ICON}"
 
   CreateDirectory "$SMPROGRAMS\${APPNAME}"
-  CreateShortcut "$SMPROGRAMS\${APPNAME}\${APPNAME}.lnk" \
-    "$INSTDIR\${SLUG}.exe" "" "$INSTDIR\${SLUG}.ico"
+  CreateShortcut "$SMPROGRAMS\${APPNAME}\${APPNAME}.lnk" "$INSTDIR\${SLUG}.exe" "" "$INSTDIR\${SLUG}.ico"
 
   WriteRegStr HKLM "Software\${APPNAME}" "InstallDir" "$INSTDIR"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
@@ -89,8 +92,7 @@ Section "${APPNAME} (required)" SecCore
 SectionEnd
 
 Section "Desktop shortcut" SecDesktop
-  CreateShortcut "$DESKTOP\${APPNAME}.lnk" \
-    "$INSTDIR\${SLUG}.exe" "" "$INSTDIR\${SLUG}.ico"
+  CreateShortcut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\${SLUG}.exe" "" "$INSTDIR\${SLUG}.ico"
 SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
