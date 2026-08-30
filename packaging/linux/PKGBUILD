@@ -1,0 +1,36 @@
+# Maintainer: Aaron Bedra <aaron@aaronbedra.com>
+#
+# Shipped as a release artifact. `pkgver` and `sha256sums` are rewritten by
+# the release workflow (.github/workflows/release.yml) before upload; the
+# values committed here are only a template.
+pkgname=wu-wei
+pkgver=0.0.0
+pkgrel=1
+pkgdesc="A GTD-style task manager with AI-assisted capture and folder-based sync"
+arch=('x86_64')
+url="https://github.com/abedra/wei-wu"
+license=('custom')
+depends=('gcc-libs' 'glibc' 'libgl' 'libxkbcommon' 'wayland' 'libx11')
+makedepends=('rust' 'cargo')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/abedra/wei-wu/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+_srcdir="wei-wu-$pkgver"
+
+build() {
+    cd "$_srcdir"
+    export CARGO_TARGET_DIR=target
+    cargo build --release --locked
+    ./target/release/wu-wei emit-icons dist
+}
+
+package() {
+    cd "$_srcdir"
+    install -Dm755 target/release/wu-wei "$pkgdir/usr/bin/wu-wei"
+    install -Dm644 packaging/linux/wu-wei.desktop \
+        "$pkgdir/usr/share/applications/wu-wei.desktop"
+    install -Dm644 dist/wu-wei.png \
+        "$pkgdir/usr/share/icons/hicolor/256x256/apps/wu-wei.png"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/wu-wei/README.md"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/wu-wei/LICENSE"
+}

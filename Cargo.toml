@@ -2,6 +2,12 @@
 name = "wu-wei"
 version = "0.1.0"
 edition = "2024"
+description = "A GTD-style task manager with AI-assisted capture and folder-based sync"
+authors = ["Aaron Bedra <aaron@aaronbedra.com>"]
+license = "LicenseRef-proprietary"
+repository = "https://github.com/abedra/wei-wu"
+homepage = "https://github.com/abedra/wei-wu"
+publish = false
 
 [dependencies]
 anyhow = "1.0.104"
@@ -20,3 +26,47 @@ thiserror = "2.0.20"
 ureq = { version = "3.4.0", features = ["json"] }
 uuid = { version = "1.24.1", features = ["v4"] }
 webbrowser = "1.0.5"
+
+# --- Packaging -------------------------------------------------------------
+# Consumed by `cargo deb` and `cargo generate-rpm` in the release workflow
+# (.github/workflows/release.yml). Both run *after* a plain `cargo build
+# --release` and a `wu-wei emit-icons dist/`, so they reference the already
+# built binary and the generated PNG rather than building anything themselves.
+
+[package.metadata.deb]
+maintainer = "Aaron Bedra <aaron@aaronbedra.com>"
+copyright = "2026 Aaron Bedra"
+section = "utils"
+priority = "optional"
+extended-description = """
+A fast, keyboard-driven GTD-style task manager. Stores tasks and projects in a \
+local SQLite database, offers optional AI-assisted quick capture and a \
+conversational assistant (OpenAI or Anthropic), and can sync across machines \
+over a shared folder. Works fully offline.\
+"""
+# eframe's glow backend dlopen()s libGL/libEGL and winit dlopen()s the
+# Wayland/X11 client libs, so dpkg-shlibdeps ($auto) never sees them.
+depends = "$auto, libgl1, libegl1, libxkbcommon0, libwayland-client0, libx11-6"
+assets = [
+    ["target/release/wu-wei", "usr/bin/", "755"],
+    ["packaging/linux/wu-wei.desktop", "usr/share/applications/", "644"],
+    ["dist/wu-wei.png", "usr/share/icons/hicolor/256x256/apps/wu-wei.png", "644"],
+    ["README.md", "usr/share/doc/wu-wei/README.md", "644"],
+    ["LICENSE", "usr/share/doc/wu-wei/LICENSE", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/wu-wei", dest = "/usr/bin/wu-wei", mode = "755" },
+    { source = "packaging/linux/wu-wei.desktop", dest = "/usr/share/applications/wu-wei.desktop", mode = "644" },
+    { source = "dist/wu-wei.png", dest = "/usr/share/icons/hicolor/256x256/apps/wu-wei.png", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/wu-wei/README.md", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/wu-wei/LICENSE", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+mesa-libGL = "*"
+mesa-libEGL = "*"
+libxkbcommon = "*"
+libwayland-client = "*"
+libX11 = "*"

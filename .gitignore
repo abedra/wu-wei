@@ -1,3 +1,4 @@
 /target
 /wu_wei.db
 .env
+/dist

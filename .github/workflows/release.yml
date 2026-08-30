@@ -1,0 +1,154 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version for a dry-run build (nothing is published)"
+        required: true
+        default: "0.0.0-test"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            V="${GITHUB_REF_NAME#v}"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            V="${{ inputs.version }}"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          CARGO_V=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          echo "tag/input version: $V ; Cargo.toml: $CARGO_V"
+          if [ "${{ github.event_name }}" = "push" ] && [ "$V" != "$CARGO_V" ]; then
+            echo "::error::tag v$V does not match Cargo.toml version $CARGO_V"
+            exit 1
+          fi
+
+  linux:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        run: |
+          mkdir -p dist
+          ./target/release/wu-wei emit-icons dist
+          cargo deb --no-build --output dist
+          cargo generate-rpm --output dist
+          sed "s/^pkgver=.*/pkgver=${{ needs.version.outputs.version }}/" \
+            packaging/linux/PKGBUILD > dist/PKGBUILD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/PKGBUILD
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Append
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          .\target\release\wu-wei.exe emit-icons dist
+          $v = "${{ needs.version.outputs.version }}"
+          makensis /DVERSION=$v `
+            /DSRCDIR=target\release `
+            /DICON=dist\wu-wei.ico `
+            /DOUTFILE=dist\Wu-Wei-Setup-$v.exe `
+            packaging\windows\installer.nsi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.exe
+
+  macos:
+    needs: version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build universal binary
+        run: |
+          cargo build --release --locked --target x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/wu-wei-universal \
+            target/x86_64-apple-darwin/release/wu-wei \
+            target/aarch64-apple-darwin/release/wu-wei
+      - name: Bundle + DMG
+        run: |
+          v="${{ needs.version.outputs.version }}"
+          bash packaging/macos/make-bundle.sh dist/wu-wei-universal "$v" dist
+          brew install create-dmg
+          create-dmg \
+            --volname "Wu Wei" \
+            --window-size 600 360 \
+            --icon "Wu Wei.app" 140 180 \
+            --app-drop-link 420 180 \
+            "dist/Wu-Wei-$v.dmg" "dist/Wu Wei.app" \
+            || test -f "dist/Wu-Wei-$v.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.dmg
+
+  publish:
+    needs: [version, linux, windows, macos]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - run: |
+          mkdir -p dist
+          find artifacts -type f -exec cp {} dist/ \;
+          ls -l dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

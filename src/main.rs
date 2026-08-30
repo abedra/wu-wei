@@ -19,13 +19,26 @@ mod ui;
 use app::WuWeiApp;
 
 fn main() -> eframe::Result<()> {
-    if std::env::args().nth(1).as_deref() == Some("install-desktop") {
-        let exe = std::env::current_exe()
-            .expect("failed to resolve the current executable's path")
-            .to_string_lossy()
-            .into_owned();
-        desktop_install::run(&exe);
-        return Ok(());
+    match std::env::args().nth(1).as_deref() {
+        Some("install-desktop") => {
+            let exe = std::env::current_exe()
+                .expect("failed to resolve the current executable's path")
+                .to_string_lossy()
+                .into_owned();
+            desktop_install::run(&exe);
+            return Ok(());
+        }
+        // Used by the packaging scripts (see `packaging/`) to get icon files
+        // on disk before the app itself is installed — the icons are drawn
+        // procedurally, not shipped as assets.
+        Some("emit-icons") => {
+            let dir = std::env::args()
+                .nth(2)
+                .expect("usage: wu-wei emit-icons <dir>");
+            desktop_install::emit_icons(&dir);
+            return Ok(());
+        }
+        _ => {}
     }
 
     let db_path = db_bootstrap::resolve_db_path();

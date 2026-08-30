@@ -1,6 +1,6 @@
-use rusqlite::{Connection, params};
 #[cfg(test)]
 use rusqlite::OptionalExtension;
+use rusqlite::{Connection, params};
 use uuid::Uuid;
 
 use super::error::{DbError, DbResult};

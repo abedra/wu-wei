@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Wu Wei
+Comment=A GTD-style task manager
+Exec=wu-wei
+Icon=wu-wei
+Terminal=false
+Categories=Office;
+StartupWMClass=wu-wei

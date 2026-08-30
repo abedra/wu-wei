@@ -7,7 +7,7 @@ ifneq (,$(wildcard ./.env))
     export
 endif
 
-.PHONY: help doctor run build release install-desktop test fmt fmt-check clippy check clean
+.PHONY: help doctor run build release install-desktop emit-icons package-linux test fmt fmt-check clippy check clean
 
 help:
 	@echo "wu-wei — available targets:"
@@ -16,6 +16,8 @@ help:
 	@echo "  build           debug build"
 	@echo "  release         release build"
 	@echo "  install-desktop register the app so switchers/docks show the logo (Linux .desktop / macOS .app / Windows Start Menu)"
+	@echo "  emit-icons      write wu-wei.{png,icns,ico} to dist/ (used by the packaging steps)"
+	@echo "  package-linux   build .deb + .rpm into dist/ (needs cargo-deb + cargo-generate-rpm)"
 	@echo "  test            run the test suite"
 	@echo "  fmt             apply rustfmt"
 	@echo "  fmt-check       check formatting without writing changes"
@@ -51,6 +53,16 @@ release:
 ## debug artifact `cargo clean` would delete out from under them.
 install-desktop: release
 	./target/release/wu-wei install-desktop
+
+emit-icons: release
+	./target/release/wu-wei emit-icons dist
+
+## Builds the Linux installers into dist/. Full details, and how the Windows
+## and macOS installers are built (on their own CI runners), are in
+## packaging/README.md.
+package-linux: release emit-icons
+	cargo deb --no-build --output dist
+	cargo generate-rpm --output dist
 
 test:
 	cargo test

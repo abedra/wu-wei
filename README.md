@@ -16,14 +16,30 @@ Wu Wei stores tasks and projects in a local SQLite database, offers AI-assisted 
 - **Google Calendar in Today** — optionally connect a Google Calendar to show today's events alongside today's tasks. See [Google Calendar](#google-calendar).
 - **Local-first** — a single SQLite file; everything works fully offline. AI features are entirely optional.
 
-## Requirements
+## Installation
+
+Each tagged release publishes an installer per OS on the
+[Releases](https://github.com/abedra/wei-wu/releases) page:
+
+| OS | Download | Install |
+| --- | --- | --- |
+| Linux (Debian/Ubuntu) | `wu-wei_<v>_amd64.deb` | `sudo dpkg -i wu-wei_*.deb` (or open with your software centre) |
+| Linux (Fedora/RHEL) | `wu-wei-<v>.x86_64.rpm` | `sudo rpm -i wu-wei-*.rpm` |
+| Linux (Arch) | `PKGBUILD` | `makepkg -si` in a directory containing it |
+| Windows | `Wu-Wei-Setup-<v>.exe` | run it (per-machine install; click through the SmartScreen prompt — the build is not code-signed yet) |
+| macOS | `Wu-Wei-<v>.dmg` | open it, drag **Wu Wei** to Applications, then **first launch only**: right-click the app → Open → Open (the build is not notarized yet) |
+
+The database is created on first launch in a per-OS data directory (see below).
+How the installers are built lives in [`packaging/`](packaging/README.md).
+
+## Building from source
+
+### Requirements
 
 - [Rust](https://rustup.rs) (edition 2024, so `rustc >= 1.85`)
 - A C compiler (`cc`) — needed to build bundled SQLite and rustls' `ring` backend
 
 Run `make doctor` to check your toolchain.
-
-## Getting started
 
 ```sh
 git clone <repo-url> wu-wei
@@ -72,7 +88,13 @@ make clippy         # run clippy lints (all targets)
 make check          # fmt-check + clippy + test
 make clean          # cargo clean
 make install-desktop # install a .desktop entry + icon (Linux app switchers)
+make emit-icons     # write wu-wei.{png,icns,ico} to dist/
+make package-linux  # build .deb + .rpm into dist/
 ```
+
+Release installers for all three platforms are built by
+[`.github/workflows/release.yml`](.github/workflows/release.yml); see
+[`packaging/`](packaging/README.md).
 
 ## Project layout
 
@@ -82,7 +104,7 @@ src/
   app.rs              top-level egui layout (sidebar, detail panel, chat, task list)
   state.rs             AppState: application state and all mutations
   db_bootstrap.rs      resolves which database file to open at launch
-  desktop_install.rs   installs a .desktop entry + icon on Linux
+  desktop_install.rs   `install-desktop` / `emit-icons` subcommands (desktop entry, bundle, icon files)
   domain/              core types: Task, Project
   db/                  SQLite schema and repositories
   llm/                 OpenAI/Anthropic providers, prompt construction, chat actions

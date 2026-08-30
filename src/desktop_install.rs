@@ -25,6 +25,30 @@ pub fn run(exe: &str) {
     run_linux(exe);
 }
 
+/// Writes the app mark to `dir` in every packaging format — `wu-wei.png`
+/// (256px, for Linux hicolor), `wu-wei.icns` (macOS bundle), `wu-wei.ico`
+/// (Windows). The installers (`packaging/`) need real files on disk at build
+/// time; the icon is drawn procedurally (see `crate::ui::icon`), so this is
+/// how a build machine turns it into assets. Platform-independent on purpose
+/// — a Linux CI runner still produces the `.ico` the Windows job consumes if
+/// need be, and vice versa.
+pub fn emit_icons(dir: &str) {
+    let dir = PathBuf::from(dir);
+    fs::create_dir_all(&dir).expect("failed to create the icon output directory");
+
+    let files: [(&str, Vec<u8>); 3] = [
+        ("wu-wei.png", icon::enso_png(256, theme::ACCENT)),
+        ("wu-wei.icns", icon::enso_icns(theme::ACCENT)),
+        ("wu-wei.ico", icon::enso_ico(theme::ACCENT)),
+    ];
+    for (name, bytes) in files {
+        let path = dir.join(name);
+        fs::write(&path, bytes)
+            .unwrap_or_else(|e| panic!("failed to write {}: {e}", path.display()));
+        println!("wrote {}", path.display());
+    }
+}
+
 /// Builds an `.app` bundle under `~/Applications` so Launchpad, Finder, the
 /// Dock and the ⌘-Tab switcher resolve the app's name and icon. macOS keys all
 /// of that off the enclosing bundle (its `Info.plist` and `.icns`), not off the
@@ -133,8 +157,7 @@ fn run_macos(exe: &str) {
 #[cfg(target_os = "windows")]
 fn run_windows(exe: &str) {
     let start_menu = PathBuf::from(
-        std::env::var_os("APPDATA")
-            .expect("APPDATA must be set to install a Start Menu shortcut"),
+        std::env::var_os("APPDATA").expect("APPDATA must be set to install a Start Menu shortcut"),
     )
     .join(r"Microsoft\Windows\Start Menu\Programs");
     fs::create_dir_all(&start_menu).expect("failed to create Start Menu Programs directory");
