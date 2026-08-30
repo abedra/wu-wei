@@ -1,6 +1,6 @@
 [package]
 name = "wu-wei"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "A GTD-style task manager with AI-assisted capture and folder-based sync"
 authors = ["Aaron Bedra <aaron@aaronbedra.com>"]
