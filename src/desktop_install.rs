@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 
 use crate::ui::{icon, theme};
@@ -45,7 +46,11 @@ pub fn emit_icons(dir: &str) {
         let path = dir.join(name);
         fs::write(&path, bytes)
             .unwrap_or_else(|e| panic!("failed to write {}: {e}", path.display()));
-        println!("wrote {}", path.display());
+        // Not `println!`: release builds are linked as a GUI subsystem binary
+        // on Windows, where stdout can be an invalid handle and `println!`
+        // would panic *after* a partial write. A dropped progress line is
+        // fine; a half-written icon set is not.
+        let _ = writeln!(std::io::stdout(), "wrote {}", path.display());
     }
 }
 

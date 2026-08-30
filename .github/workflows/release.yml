@@ -94,7 +94,17 @@ jobs:
         run: |
           $ws = $env:GITHUB_WORKSPACE
           New-Item -ItemType Directory -Force -Path "$ws\dist" | Out-Null
-          & "$ws\target\release\wu-wei.exe" emit-icons "$ws\dist"
+          # wu-wei.exe is linked as a GUI-subsystem binary, so PowerShell does
+          # not block on a bare `& wu-wei.exe ...` call — it returns before the
+          # icons are written and makensis then can't find wu-wei.ico. Force
+          # the wait, then confirm the file landed.
+          $p = Start-Process -FilePath "$ws\target\release\wu-wei.exe" `
+            -ArgumentList "emit-icons","$ws\dist" -Wait -NoNewWindow -PassThru
+          if ($p.ExitCode -ne 0) { throw "emit-icons exited with $($p.ExitCode)" }
+          if (-not (Test-Path "$ws\dist\wu-wei.ico")) {
+            throw "emit-icons did not produce dist\wu-wei.ico"
+          }
+          Get-ChildItem "$ws\dist"
           $v = "${{ needs.version.outputs.version }}"
           $m = [regex]::Match($v, '^\d+\.\d+\.\d+')
           $viv = if ($m.Success) { "$($m.Value).0" } else { "0.0.0.0" }
