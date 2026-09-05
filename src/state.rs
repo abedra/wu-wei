@@ -85,6 +85,27 @@ pub fn project_display_name(project_id: Option<ProjectId>, projects: &[Project])
     }
 }
 
+/// Orders two optional priorities: lower numbers first, an unset priority
+/// always sorting last regardless of `direction` (it has nothing to compare
+/// against). Shared by the manual Priority column sort and the automatic
+/// baseline order `AppState::refresh_visible_tasks` gives the Today
+/// perspective.
+fn compare_priority(
+    a: Option<i64>,
+    b: Option<i64>,
+    direction: SortDirection,
+) -> std::cmp::Ordering {
+    match (a, b) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (Some(x), Some(y)) => match direction {
+            SortDirection::Ascending => x.cmp(&y),
+            SortDirection::Descending => y.cmp(&x),
+        },
+    }
+}
+
 /// A small keyboard-driven picker for reassigning a task's project.
 /// `highlighted` indexes a virtual list: `0` is Inbox, `i + 1` is `AppState.projects[i]`.
 pub struct ProjectPickerState {
@@ -759,6 +780,16 @@ impl AppState {
             Perspective::Project(id) => task_repo::list_by_project(&self.conn, id),
         };
         self.visible_tasks = self.unwrap_or_report(result, Vec::new());
+        if self.perspective == Perspective::Today {
+            // Today's baseline order is priority (ties keeping the query's
+            // own due-date order), applied before any explicit `sort_key`
+            // override below — the same automatic, no-click-required
+            // ordering `schedule::plan_today` already gives the calendar-
+            // driven agenda, extended to the plain-table view shown when no
+            // calendar is connected.
+            self.visible_tasks
+                .sort_by(|a, b| compare_priority(a.priority, b.priority, SortDirection::Ascending));
+        }
         self.sort_visible_tasks();
         self.refresh_today_schedule();
         if let Some(id) = self.highlighted_task
@@ -877,17 +908,8 @@ impl AppState {
             }
             TaskSortKey::Priority => {
                 let direction = self.sort_direction;
-                // Like `Estimate`, a task with no priority has nothing to
-                // compare, so it always sorts last regardless of direction.
-                self.visible_tasks.sort_by(|a, b| match (a.priority, b.priority) {
-                    (None, None) => std::cmp::Ordering::Equal,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (Some(x), Some(y)) => match direction {
-                        SortDirection::Ascending => x.cmp(&y),
-                        SortDirection::Descending => y.cmp(&x),
-                    },
-                });
+                self.visible_tasks
+                    .sort_by(|a, b| compare_priority(a.priority, b.priority, direction));
             }
             TaskSortKey::Project => {
                 let direction = self.sort_direction;
@@ -4821,5 +4843,47 @@ mod tests {
         state.google_calendar_config = Some(fake_calendar_config());
         state.set_perspective(Perspective::Review);
         assert!(state.today_schedule.is_empty());
+    }
+
+    #[test]
+    fn today_perspective_auto_sorts_by_priority_without_needing_a_sort_click() {
+        // No calendar connected, so this exercises the plain-table path
+        // (`ui::task_list`'s fallback), not `schedule::plan_today` — that
+        // algorithm already orders by priority on its own. Tasks are added
+        // in an order that would otherwise stay due-date/creation order
+        // (`sort_key` defaults to `Natural`), so seeing them come back
+        // priority-first proves it's automatic, not something the user had
+        // to click a header for.
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        let today = Local::now().date_naive();
+
+        let set_priority = |state: &mut AppState, title: &str, priority: Option<i64>| {
+            state.quick_entry_buffer = title.to_string();
+            state.quick_capture_submit();
+            let id = state
+                .visible_tasks
+                .iter()
+                .find(|t| t.title == title)
+                .unwrap()
+                .id;
+            state.select_task(id);
+            let buf = state.task_edit_buffer.as_mut().unwrap();
+            buf.due_date = Some(today);
+            buf.priority = priority;
+            state.save_task_edits();
+        };
+
+        set_priority(&mut state, "no priority", None);
+        set_priority(&mut state, "someday", Some(9));
+        set_priority(&mut state, "urgent", Some(1));
+
+        state.set_perspective(Perspective::Today);
+        assert_eq!(state.sort_key, TaskSortKey::Natural);
+        let titles: Vec<&str> = state
+            .visible_tasks
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(titles, ["urgent", "someday", "no priority"]);
     }
 }
