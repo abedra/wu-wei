@@ -4,7 +4,7 @@ use egui_extras::{Column, TableBuilder};
 
 use crate::domain::project::ProjectId;
 use crate::domain::task::TaskId;
-use crate::schedule::ScheduleRow;
+use crate::schedule::{self, ScheduleRow};
 use crate::state::{
     AppState, Perspective, Selection, SortDirection, TaskSortKey, project_display_name,
 };
@@ -19,6 +19,12 @@ fn draw_calendar_events(ui: &mut egui::Ui, state: &AppState) {
     if state.perspective != Perspective::Today || state.google_calendar_config.is_none() {
         return;
     }
+    let now = Local::now();
+    let current_events: Vec<_> = state
+        .calendar_events
+        .iter()
+        .filter(|e| schedule::is_current(e, now))
+        .collect();
     ui.group(|ui| {
         ui.horizontal(|ui| {
             ui.strong("Today's Events");
@@ -28,10 +34,10 @@ fn draw_calendar_events(ui: &mut egui::Ui, state: &AppState) {
         });
         if let Some(status) = &state.calendar_status {
             ui.colored_label(theme::OVERDUE, status);
-        } else if state.calendar_events.is_empty() {
+        } else if current_events.is_empty() {
             ui.weak("No events today.");
         }
-        for event in &state.calendar_events {
+        for event in current_events {
             ui.horizontal(|ui| {
                 let time_label = if event.all_day {
                     "All day".to_string()

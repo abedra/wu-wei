@@ -15,6 +15,8 @@
 //!    one after another from that point on, in that same priority order.
 //!  * A task with no estimate has nothing to schedule against, so it drops
 //!    to the bottom of the list, still ordered by priority among itself.
+//!  * A timed event drops off the list entirely once its end time has
+//!    passed — see [`is_current`]. An all-day event never expires this way.
 
 use chrono::{DateTime, Duration, Local, NaiveTime};
 
@@ -50,6 +52,17 @@ fn priority_key(task: &Task) -> i64 {
     task.priority.unwrap_or(i64::MAX)
 }
 
+/// Whether `event` still belongs in the Today view at `now`: a timed event
+/// stays until its end time passes, then drops off entirely — a meeting
+/// that's already over isn't useful context for planning the rest of the
+/// day. An all-day event has no meaningful "end" for this purpose (see
+/// `CalendarEvent::all_day`), so it never expires this way. Exposed so
+/// `ui::task_list`'s pre-schedule "Today's Events" fallback can apply the
+/// same rule before `plan_today` has anything to compute against.
+pub fn is_current(event: &CalendarEvent, now: DateTime<Local>) -> bool {
+    event.all_day || event.end.with_timezone(&Local) > now
+}
+
 /// Builds the interleaved event/task ordering for the Today view. `now` is
 /// the anchor the first task can start at — gaps entirely in the past are
 /// skipped.
@@ -67,11 +80,13 @@ pub fn plan_today(
         }
     }
 
-    // Timed events in chronological order, keeping their original indices.
+    // Timed events not yet over, in chronological order, keeping their
+    // original indices — one that's already ended is dropped entirely
+    // (see `is_current`), not just left in place.
     let mut timed: Vec<usize> = events
         .iter()
         .enumerate()
-        .filter(|(_, e)| !e.all_day)
+        .filter(|(_, e)| !e.all_day && is_current(e, now))
         .map(|(i, _)| i)
         .collect();
     timed.sort_by_key(|&i| events[i].start);
@@ -430,5 +445,46 @@ mod tests {
         ];
         let rows = plan_today(&[], &tasks, now_at(9, 0));
         assert_eq!(titles(&rows, &[], &tasks), ["Prioritized", "No priority"]);
+    }
+
+    #[test]
+    fn a_timed_event_disappears_once_its_end_time_passes() {
+        let events = vec![
+            event("Standup", (9, 0), (9, 30)),
+            event("Lunch", (12, 0), (13, 0)),
+        ];
+        let rows = plan_today(&events, &[], now_at(10, 0));
+        assert_eq!(titles(&rows, &events, &[]), ["Lunch"]);
+    }
+
+    #[test]
+    fn an_in_progress_event_still_shows() {
+        // `now` is inside the event's span, not past its end — it hasn't
+        // expired yet.
+        let events = vec![event("Long meeting", (9, 0), (11, 0))];
+        let rows = plan_today(&events, &[], now_at(10, 0));
+        assert_eq!(titles(&rows, &events, &[]), ["Long meeting"]);
+    }
+
+    #[test]
+    fn an_all_day_event_never_expires() {
+        let events = vec![all_day("Company holiday")];
+        // Well past the all-day event's own (nominal) end-of-day timestamp.
+        let rows = plan_today(&events, &[], now_at(23, 30));
+        assert_eq!(titles(&rows, &events, &[]), ["Company holiday"]);
+    }
+
+    #[test]
+    fn an_expired_event_no_longer_blocks_a_task_from_its_old_slot() {
+        // Once "Standup" is gone, a task that couldn't have fit around it
+        // is free to use that time.
+        let events = vec![event("Standup", (9, 0), (9, 30))];
+        let tasks = vec![task("Catch up", Some(45))];
+        let rows = plan_today(&events, &tasks, now_at(9, 30));
+        assert_eq!(titles(&rows, &events, &tasks), ["Catch up"]);
+        assert_eq!(
+            task_start(&rows, &tasks, "Catch up"),
+            Some(NaiveTime::from_hms_opt(9, 30, 0).unwrap())
+        );
     }
 }
