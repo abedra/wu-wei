@@ -1334,9 +1334,9 @@ impl AppState {
         }
     }
 
-    /// Turns an LLM-parsed capture into a real task: matches `project` by
-    /// name against known projects (never creates one — the prompt already
-    /// tells the model not to invent names).
+    /// Turns an LLM-parsed capture into a real task. `parsed.project` (the
+    /// model's own guess) is deliberately ignored — see the comment at its
+    /// use site below.
     fn apply_parsed_task(&mut self, parsed: ParsedTask) {
         let mut task = Task::new_inbox(parsed.title);
         // A recurring task with no explicit date still needs one to show up
@@ -1351,13 +1351,12 @@ impl AppState {
         });
         task.recurrence = parsed.recurrence;
 
-        if let Some(name) = parsed.project {
-            task.project_id = self
-                .projects
-                .iter()
-                .find(|p| p.name.eq_ignore_ascii_case(&name))
-                .map(|p| p.id);
-        } else if let Perspective::Project(id) = self.perspective {
+        // Quick capture always files into whatever's currently in scope —
+        // the model's own project guess (`parsed.project`) is deliberately
+        // ignored here, matching the plain (non-AI) `quick_capture_submit`
+        // path exactly, so AI-assisted capture never files a task somewhere
+        // other than where the popup was actually opened from.
+        if let Perspective::Project(id) = self.perspective {
             task.project_id = Some(id);
         }
 
@@ -2961,26 +2960,30 @@ mod tests {
     }
 
     #[test]
-    fn apply_parsed_task_matches_project_case_insensitively_and_sets_due_date() {
+    fn apply_parsed_task_ignores_the_models_project_guess_and_uses_the_current_perspective() {
+        // The model's own project guess (`parsed.project`) must never
+        // override where the popup was actually opened from — quick capture
+        // always files into whatever's currently in scope, AI-assisted or
+        // not, so it never surprises the user by filing a task somewhere
+        // other than where they were looking.
         let mut state = AppState::new(crate::db::open_in_memory().unwrap());
         state.new_project_name = "Kitchen Remodel".to_string();
         state.create_project();
-        let project_id = state.projects[0].id;
+        let kitchen_id = state.projects[0].id;
+        state.new_project_name = "Some Other Project".to_string();
+        state.create_project();
         let due = chrono::NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
 
+        state.set_perspective(Perspective::Project(kitchen_id));
         state.apply_parsed_task(ParsedTask {
             title: "pick tile".to_string(),
             due_date: Some(due),
-            project: Some("kitchen remodel".to_string()),
+            project: Some("Some Other Project".to_string()),
             recurrence: None,
         });
 
-        // Perspective is still Inbox, so the project-filed task shouldn't show here.
-        assert_eq!(state.visible_tasks.len(), 0);
-
-        state.set_perspective(Perspective::Project(project_id));
         assert_eq!(state.visible_tasks.len(), 1);
-        assert_eq!(state.visible_tasks[0].project_id, Some(project_id));
+        assert_eq!(state.visible_tasks[0].project_id, Some(kitchen_id));
         assert_eq!(state.visible_tasks[0].due_date, Some(due));
     }
 
@@ -3004,17 +3007,21 @@ mod tests {
     }
 
     #[test]
-    fn apply_parsed_task_never_invents_an_unknown_project() {
+    fn apply_parsed_task_falls_back_to_inbox_when_no_project_is_in_scope() {
+        // Even when the model names a real, existing project, no project
+        // being in scope (Inbox, Today, ...) means the task still lands in
+        // the Inbox — the model's guess is discarded either way.
         let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.new_project_name = "Kitchen Remodel".to_string();
+        state.create_project();
 
         state.apply_parsed_task(ParsedTask {
             title: "pick tile".to_string(),
             due_date: None,
-            project: Some("Nonexistent Project".to_string()),
+            project: Some("Kitchen Remodel".to_string()),
             recurrence: None,
         });
 
-        assert!(state.projects.is_empty());
         assert_eq!(state.visible_tasks.len(), 1);
         assert!(state.visible_tasks[0].project_id.is_none());
     }

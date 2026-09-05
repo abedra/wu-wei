@@ -33,8 +33,9 @@ use crate::domain::task::{Recurrence, RecurrenceUnit, Task, TaskId, WeekdaySet};
 /// Flat, JSON-serializable mirror of `domain::task::Task` — sync's wire
 /// format doesn't derive serde on the domain type directly, matching how
 /// `llm/prompt.rs` keeps its own JSON-boundary structs separate from
-/// domain ones.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// domain ones. `PartialEq` backs `already_current`'s whole-record
+/// comparison — see its doc comment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SyncTask {
     pub id: String,
     pub title: String,
@@ -124,7 +125,7 @@ impl SyncTask {
 
 /// Flat, JSON-serializable mirror of `domain::project::Project` — see
 /// `SyncTask`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SyncProject {
     pub id: String,
     pub name: String,
@@ -309,8 +310,9 @@ pub fn merge(conn: &Connection, local: &Snapshot, remotes: &[Snapshot]) -> DbRes
             .chain(remotes.iter().flat_map(|r| r.projects.iter())),
         |p| p.id.clone(),
         |p| p.updated_at,
-        // Projects have no completion state; leave ties to first-writer.
-        |_, _| false,
+        // Projects have no completion state, so this is purely the same
+        // deterministic, order-independent fallback tasks use below.
+        |cand, existing| deterministic_tiebreak(cand, existing),
         &project_tombstones,
     );
     let local_project_ids: HashSet<&str> = local.projects.iter().map(|p| p.id.as_str()).collect();
@@ -325,9 +327,7 @@ pub fn merge(conn: &Connection, local: &Snapshot, remotes: &[Snapshot]) -> DbRes
         sync_repo::record_tombstone(conn, "project", id, *deleted_at)?;
     }
     for (id, version) in &project_versions {
-        if already_current(&local.projects, id, version.updated_at, |p| {
-            (p.id.as_str(), p.updated_at)
-        }) {
+        if already_current(&local.projects, id, version, |p| p.id.as_str()) {
             continue;
         }
         if let Some(project) = version.clone().into_project() {
@@ -346,9 +346,20 @@ pub fn merge(conn: &Connection, local: &Snapshot, remotes: &[Snapshot]) -> DbRes
         |t| t.id.clone(),
         |t| t.updated_at,
         // A completion beats a not-completed copy at an equal timestamp — see
-        // `winning_versions`. Only fires on legacy ties; new edits all carry a
-        // distinct `updated_at`.
-        |cand, existing| cand.completed && !existing.completed,
+        // `winning_versions`. Ordinarily only fires on legacy ties, since new
+        // edits all carry a distinct `updated_at` — but if two versions ever
+        // do tie *and* disagree on some other field too (e.g. a stray direct
+        // DB edit that didn't bump `updated_at`), fall through to a
+        // deterministic, content-based tiebreak so every device converges on
+        // the same winner instead of each one permanently keeping its own
+        // copy (see `winning_versions`'s doc comment).
+        |cand, existing| {
+            if cand.completed != existing.completed {
+                cand.completed && !existing.completed
+            } else {
+                deterministic_tiebreak(cand, existing)
+            }
+        },
         &task_tombstones,
     );
     let local_task_ids: HashSet<&str> = local.tasks.iter().map(|t| t.id.as_str()).collect();
@@ -363,12 +374,7 @@ pub fn merge(conn: &Connection, local: &Snapshot, remotes: &[Snapshot]) -> DbRes
         sync_repo::record_tombstone(conn, "task", id, *deleted_at)?;
     }
     for (id, version) in &task_versions {
-        if already_current(
-            &local.tasks,
-            id,
-            (version.updated_at, version.completed),
-            |t| (t.id.as_str(), (t.updated_at, t.completed)),
-        ) {
+        if already_current(&local.tasks, id, version, |t| t.id.as_str()) {
             continue;
         }
         if let Some(task) = version.clone().into_task(&surviving_project_ids) {
@@ -407,12 +413,15 @@ fn tombstones_by_id(
 /// regardless of any upsert's timestamp.
 ///
 /// `prefer_on_tie(candidate, existing)` breaks an exact `updated_at` tie: when
-/// it returns true the candidate replaces the existing pick. Ties would
-/// otherwise resolve to whichever source happened to be iterated first
-/// (HashMap/directory order — nondeterministic). For tasks this makes a
-/// completed version beat a not-completed one at equal timestamps, both fixing
-/// that nondeterminism and healing data written before completion started
-/// stamping `updated_at` (see `task_repo::set_completed`).
+/// it returns true the candidate replaces the existing pick. Without it, a
+/// tie would resolve to whichever source happens to be iterated first —
+/// `local` is always chained ahead of `remotes` at the call site below, so
+/// naively that would mean every device permanently prefers its *own* copy
+/// on a tie, and two devices could disagree forever, no matter how many more
+/// times they sync. `prefer_on_tie` must therefore be symmetric — give the
+/// same answer regardless of which side is `cand` versus `existing` — so
+/// every device converges on the same winner; see `deterministic_tiebreak`,
+/// the fallback both call sites below end on.
 fn winning_versions<'a, T: Clone + 'a>(
     items: impl Iterator<Item = &'a T>,
     id_of: impl Fn(&T) -> String,
@@ -442,23 +451,36 @@ fn winning_versions<'a, T: Clone + 'a>(
     result
 }
 
+/// An order-independent tie-break for `winning_versions`: prefers whichever
+/// of `cand`/`existing` serializes to the lexicographically greater JSON
+/// string. Which one specifically wins is arbitrary — the only property that
+/// matters is that it's the same answer everywhere, since `cand` and
+/// `existing` swap roles depending on which side happens to be iterated
+/// first (see `winning_versions`'s doc comment).
+fn deterministic_tiebreak<T: Serialize>(cand: &T, existing: &T) -> bool {
+    let cand_json = serde_json::to_string(cand).unwrap_or_default();
+    let existing_json = serde_json::to_string(existing).unwrap_or_default();
+    cand_json > existing_json
+}
+
 /// Whether `id`'s winning version is exactly what's already stored
 /// locally — if so, `merge` skips writing it, both as a minor efficiency
-/// and so the summary only counts what actually changed. The `fingerprint`
-/// must capture every field a tie-break in `winning_versions` can flip
-/// (e.g. a task's `completed`), or a winning version that differs only in
-/// such a field — at an equal `updated_at` — would be wrongly skipped and
-/// never applied.
-fn already_current<T, F: Eq>(
+/// and so the summary only counts what actually changed. Compares the
+/// *whole* record rather than a hand-picked subset of fields: a fingerprint
+/// of only some fields (e.g. just `updated_at`/`completed`) can miss a
+/// winning version that differs only in some other field a tie-break can
+/// flip (see `winning_versions`'s `prefer_on_tie`) — a version that looked
+/// "already current" by the fingerprint would then be wrongly skipped and
+/// never actually applied.
+fn already_current<T: PartialEq>(
     local_items: &[T],
     id: &str,
-    winning_fingerprint: F,
-    id_and_fingerprint: impl Fn(&T) -> (&str, F),
+    winning_version: &T,
+    id_of: impl Fn(&T) -> &str,
 ) -> bool {
-    local_items.iter().any(|item| {
-        let (item_id, item_fingerprint) = id_and_fingerprint(item);
-        item_id == id && item_fingerprint == winning_fingerprint
-    })
+    local_items
+        .iter()
+        .any(|item| id_of(item) == id && item == winning_version)
 }
 
 /// Orchestrates one full sync round: writes this device's current state to
@@ -618,6 +640,48 @@ mod tests {
 
         let fetched = task_repo::get(&conn, task.id).unwrap().unwrap();
         assert_eq!(fetched.title, "edited remotely, later");
+    }
+
+    #[test]
+    fn a_tied_timestamp_with_differing_fields_converges_regardless_of_merge_direction() {
+        // A genuine `updated_at` collision between two devices shouldn't
+        // happen in normal use (every real edit gets a fresh `Utc::now()`
+        // stamp), but if two versions of the same task ever do tie while
+        // disagreeing on some other field (e.g. a direct DB edit that
+        // skipped the normal update path), every device must land on the
+        // *same* winner — not each permanently keep its own copy just
+        // because it happened to be "local" in its own merge.
+        let base = Task::new_inbox("shared task");
+        let mut version_a = base.clone();
+        version_a.priority = Some(1);
+        let mut version_b = base.clone();
+        version_b.priority = Some(4);
+        assert_eq!(version_a.updated_at, version_b.updated_at, "test setup: must tie");
+
+        // Merge with `version_a` actually stored locally, `version_b` arriving
+        // as a remote snapshot... `upsert_synced` (not `create`) so the row's
+        // `updated_at` is exactly `version_a`'s, not a freshly stamped one —
+        // `local_snapshot` must see the same tie the remote does.
+        let conn_a = db::open_in_memory().unwrap();
+        task_repo::upsert_synced(&conn_a, &version_a).unwrap();
+        let local_a = local_snapshot(&conn_a, "device-a").unwrap();
+        let remote_b = remote_with(vec![SyncTask::from(&version_b)], vec![]);
+        merge(&conn_a, &local_a, std::slice::from_ref(&remote_b)).unwrap();
+        let resolved_a = task_repo::get(&conn_a, base.id).unwrap().unwrap();
+
+        // ...and the other way around: `version_b` stored locally, `version_a`
+        // arriving as remote.
+        let conn_b = db::open_in_memory().unwrap();
+        task_repo::upsert_synced(&conn_b, &version_b).unwrap();
+        let local_b = local_snapshot(&conn_b, "device-b").unwrap();
+        let remote_a = remote_with(vec![SyncTask::from(&version_a)], vec![]);
+        merge(&conn_b, &local_b, std::slice::from_ref(&remote_a)).unwrap();
+        let resolved_b = task_repo::get(&conn_b, base.id).unwrap().unwrap();
+
+        assert_eq!(
+            resolved_a.priority, resolved_b.priority,
+            "the two devices converged on different priorities"
+        );
     }
 
     #[test]
