@@ -51,6 +51,7 @@ pub enum TaskSortKey {
     DueDate,
     Project,
     Estimate,
+    Priority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -251,6 +252,7 @@ pub struct TaskEditBuffer {
     pub completed_at: Option<chrono::DateTime<Utc>>,
     pub created_at: chrono::DateTime<Utc>,
     pub estimated_minutes: Option<i64>,
+    pub priority: Option<i64>,
     pub recurrence: Option<Recurrence>,
 }
 
@@ -267,6 +269,7 @@ impl TaskEditBuffer {
             completed_at: task.completed_at,
             created_at: task.created_at,
             estimated_minutes: task.estimated_minutes,
+            priority: task.priority,
             recurrence: task.recurrence,
         }
     }
@@ -824,9 +827,10 @@ impl AppState {
             self.sort_key = key;
             self.sort_direction = match key {
                 TaskSortKey::DueDate => SortDirection::Descending,
-                TaskSortKey::Natural | TaskSortKey::Project | TaskSortKey::Estimate => {
-                    SortDirection::Ascending
-                }
+                TaskSortKey::Natural
+                | TaskSortKey::Project
+                | TaskSortKey::Estimate
+                | TaskSortKey::Priority => SortDirection::Ascending,
             };
         }
         self.sort_visible_tasks();
@@ -869,6 +873,20 @@ impl AppState {
                             SortDirection::Descending => y.cmp(&x),
                         },
                     }
+                });
+            }
+            TaskSortKey::Priority => {
+                let direction = self.sort_direction;
+                // Like `Estimate`, a task with no priority has nothing to
+                // compare, so it always sorts last regardless of direction.
+                self.visible_tasks.sort_by(|a, b| match (a.priority, b.priority) {
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (Some(x), Some(y)) => match direction {
+                        SortDirection::Ascending => x.cmp(&y),
+                        SortDirection::Descending => y.cmp(&x),
+                    },
                 });
             }
             TaskSortKey::Project => {
@@ -2522,6 +2540,7 @@ impl AppState {
             // `Utc::now()` — no real value to put here.
             updated_at: buf.created_at,
             estimated_minutes: buf.estimated_minutes,
+            priority: buf.priority,
             recurrence: buf.recurrence,
         };
         if let Err(e) = task_repo::update(&self.conn, &task) {
@@ -2574,6 +2593,7 @@ impl AppState {
         next.project_id = task.project_id;
         next.due_date = Some(recurrence.next_due_date(completed_on));
         next.estimated_minutes = task.estimated_minutes;
+        next.priority = task.priority;
         next.recurrence = Some(recurrence);
 
         if let Err(e) = task_repo::create(&self.conn, &next) {
@@ -4558,6 +4578,57 @@ mod tests {
             .map(|t| t.title.as_str())
             .collect();
         assert_eq!(titles, ["long", "quick", "no estimate"]);
+    }
+
+    #[test]
+    fn set_sort_by_priority_defaults_to_ascending_with_no_priority_last() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+
+        state.quick_entry_buffer = "no priority".to_string();
+        state.quick_capture_submit();
+
+        state.quick_entry_buffer = "urgent".to_string();
+        state.quick_capture_submit();
+        let urgent_id = state
+            .visible_tasks
+            .iter()
+            .find(|t| t.title == "urgent")
+            .unwrap()
+            .id;
+        state.select_task(urgent_id);
+        state.task_edit_buffer.as_mut().unwrap().priority = Some(1);
+        state.save_task_edits();
+
+        state.quick_entry_buffer = "someday".to_string();
+        state.quick_capture_submit();
+        let someday_id = state
+            .visible_tasks
+            .iter()
+            .find(|t| t.title == "someday")
+            .unwrap()
+            .id;
+        state.select_task(someday_id);
+        state.task_edit_buffer.as_mut().unwrap().priority = Some(9);
+        state.save_task_edits();
+
+        state.set_sort(TaskSortKey::Priority);
+        assert_eq!(state.sort_direction, SortDirection::Ascending);
+        let titles: Vec<&str> = state
+            .visible_tasks
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(titles, ["urgent", "someday", "no priority"]);
+
+        // Flip to descending, unprioritized task still last.
+        state.set_sort(TaskSortKey::Priority);
+        assert_eq!(state.sort_direction, SortDirection::Descending);
+        let titles: Vec<&str> = state
+            .visible_tasks
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(titles, ["someday", "urgent", "no priority"]);
     }
 
     #[test]

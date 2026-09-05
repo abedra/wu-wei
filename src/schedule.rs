@@ -6,13 +6,15 @@
 //!  * All-day events sort to the very top — they don't block any time slot.
 //!  * Timed events keep their chronological order and are never moved.
 //!  * A task with an estimate is placed in the earliest gap (starting from
-//!    "now") where it fits end-to-end. A task that's too long for the
-//!    current gap is left for a later one, while shorter tasks behind it are
-//!    still free to fill the space it couldn't use.
+//!    "now") where it fits end-to-end. Among estimated tasks competing for
+//!    the same gap, lower-numbered `priority` goes first (unset priority
+//!    counts as lowest); a task that's too long for the current gap is left
+//!    for a later one, while lower-priority (or same-priority, later) tasks
+//!    behind it are still free to fill the space it couldn't use.
 //!  * Once the last event is past, remaining estimated tasks just queue up
-//!    one after another from that point on.
+//!    one after another from that point on, in that same priority order.
 //!  * A task with no estimate has nothing to schedule against, so it drops
-//!    to the bottom of the list.
+//!    to the bottom of the list, still ordered by priority among itself.
 
 use chrono::{DateTime, Duration, Local, NaiveTime};
 
@@ -41,6 +43,13 @@ fn estimate_minutes(task: &Task) -> Option<i64> {
     task.estimated_minutes.filter(|&m| m > 0)
 }
 
+/// A task's sort key for priority ordering: lower is higher priority, and an
+/// unset priority sorts as if it were lowest of all (`i64::MAX`) so
+/// prioritized tasks always take a fitting slot ahead of unprioritized ones.
+fn priority_key(task: &Task) -> i64 {
+    task.priority.unwrap_or(i64::MAX)
+}
+
 /// Builds the interleaved event/task ordering for the Today view. `now` is
 /// the anchor the first task can start at — gaps entirely in the past are
 /// skipped.
@@ -67,14 +76,17 @@ pub fn plan_today(
         .collect();
     timed.sort_by_key(|&i| events[i].start);
 
-    // Estimated tasks waiting for a slot, in the caller's order. A task
-    // stays here until a gap it fits in comes along.
+    // Estimated tasks waiting for a slot, lower-numbered `priority` first
+    // (unset priority last), ties broken by the caller's original order —
+    // `sort_by_key` is stable. A task stays here until a gap it fits in
+    // comes along.
     let mut pending: Vec<usize> = tasks
         .iter()
         .enumerate()
         .filter(|(_, t)| estimate_minutes(t).is_some())
         .map(|(i, _)| i)
         .collect();
+    pending.sort_by_key(|&i| priority_key(&tasks[i]));
 
     let mut cursor = now;
 
@@ -122,11 +134,17 @@ pub fn plan_today(
     // Past the last event: remaining estimated tasks queue up from here.
     fill_until(&mut cursor, &mut pending, &mut rows, None);
 
-    // Unestimated tasks sink to the bottom, in the caller's order.
-    for (index, task) in tasks.iter().enumerate() {
-        if estimate_minutes(task).is_none() {
-            rows.push(ScheduleRow::Task { index, start: None });
-        }
+    // Unestimated tasks sink to the bottom, by priority (ties keeping the
+    // caller's original order — see `pending` above).
+    let mut unestimated: Vec<usize> = tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| estimate_minutes(t).is_none())
+        .map(|(i, _)| i)
+        .collect();
+    unestimated.sort_by_key(|&i| priority_key(&tasks[i]));
+    for index in unestimated {
+        rows.push(ScheduleRow::Task { index, start: None });
     }
 
     rows
@@ -173,6 +191,12 @@ mod tests {
         let mut t = Task::new_inbox(title);
         t.id = TaskId(Uuid::new_v4());
         t.estimated_minutes = estimate;
+        t
+    }
+
+    fn prioritized_task(title: &str, estimate: Option<i64>, priority: i64) -> Task {
+        let mut t = task(title, estimate);
+        t.priority = Some(priority);
         t
     }
 
@@ -331,5 +355,80 @@ mod tests {
             task_start(&rows, &tasks, "C"),
             Some(NaiveTime::from_hms_opt(13, 30, 0).unwrap())
         );
+    }
+
+    #[test]
+    fn a_lower_priority_number_task_takes_a_fitting_slot_over_a_higher_one() {
+        // Both fit the same open time before the meeting; the one with the
+        // lower (more urgent) priority number should be slotted first,
+        // regardless of which order they were passed in.
+        let events = vec![event("Meeting", (10, 0), (10, 30))];
+        let tasks = vec![
+            prioritized_task("Nice to have", Some(30), 5),
+            prioritized_task("Urgent", Some(30), 1),
+        ];
+        let rows = plan_today(&events, &tasks, now_at(9, 0));
+
+        assert_eq!(
+            titles(&rows, &events, &tasks),
+            ["Urgent", "Nice to have", "Meeting"]
+        );
+    }
+
+    #[test]
+    fn an_unset_priority_loses_a_fitting_slot_to_any_prioritized_task() {
+        // Only one 30-minute task fits the gap before the meeting; the
+        // prioritized one takes it even though it was listed second, and
+        // the unprioritized one is bumped to after the meeting.
+        let events = vec![event("Meeting", (9, 30), (10, 0))];
+        let tasks = vec![
+            task("No priority", Some(30)),
+            prioritized_task("Prioritized", Some(30), 9),
+        ];
+        let rows = plan_today(&events, &tasks, now_at(9, 0));
+
+        assert_eq!(
+            titles(&rows, &events, &tasks),
+            ["Prioritized", "Meeting", "No priority"]
+        );
+    }
+
+    #[test]
+    fn equal_priority_falls_back_to_the_caller_supplied_order() {
+        let tasks = vec![
+            prioritized_task("First", Some(15), 2),
+            prioritized_task("Second", Some(15), 2),
+        ];
+        let rows = plan_today(&[], &tasks, now_at(9, 0));
+        assert_eq!(titles(&rows, &[], &tasks), ["First", "Second"]);
+    }
+
+    #[test]
+    fn a_higher_priority_task_that_does_not_fit_still_lets_a_lower_priority_one_through() {
+        // Mirrors `a_shorter_task_fills_a_gap_a_longer_one_could_not_use`,
+        // but with the roles reversed by priority instead of list order: the
+        // long, high-priority (low-number) task can't fit the 20-minute gap,
+        // so the short, lower-priority task behind it still gets to use it.
+        let events = vec![event("Meeting", (9, 20), (10, 0))];
+        let tasks = vec![
+            prioritized_task("Long but urgent", Some(60), 1),
+            prioritized_task("Quick, less urgent", Some(15), 5),
+        ];
+        let rows = plan_today(&events, &tasks, now_at(9, 0));
+
+        assert_eq!(
+            titles(&rows, &events, &tasks),
+            ["Quick, less urgent", "Meeting", "Long but urgent"]
+        );
+    }
+
+    #[test]
+    fn unestimated_tasks_at_the_bottom_are_still_ordered_by_priority() {
+        let tasks = vec![
+            task("No priority", None),
+            prioritized_task("Prioritized", None, 1),
+        ];
+        let rows = plan_today(&[], &tasks, now_at(9, 0));
+        assert_eq!(titles(&rows, &[], &tasks), ["Prioritized", "No priority"]);
     }
 }

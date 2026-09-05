@@ -73,6 +73,9 @@ fn migrate(conn: &Connection) -> DbResult<()> {
             [],
         )?;
     }
+    if !has_column("tasks", "priority")? {
+        conn.execute("ALTER TABLE tasks ADD COLUMN priority INTEGER", [])?;
+    }
     if !has_column("tasks", "updated_at")? {
         conn.execute("ALTER TABLE tasks ADD COLUMN updated_at TEXT", [])?;
         conn.execute(

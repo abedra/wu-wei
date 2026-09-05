@@ -164,6 +164,7 @@ fn draw_today_schedule(
         .column(Column::auto()) // complete
         .column(Column::remainder()) // title
         .column(Column::auto().at_least(70.0)) // estimate
+        .column(Column::auto().at_least(60.0)) // priority
         .column(Column::initial(project_width)) // project
         .header(28.0, |mut header| {
             header.col(|ui| {
@@ -178,6 +179,11 @@ fn draw_today_schedule(
             header.col(|ui| {
                 if sort_header(ui, "Estimate", TaskSortKey::Estimate, state).clicked() {
                     sort_clicked = Some(TaskSortKey::Estimate);
+                }
+            });
+            header.col(|ui| {
+                if sort_header(ui, "Priority", TaskSortKey::Priority, state).clicked() {
+                    sort_clicked = Some(TaskSortKey::Priority);
                 }
             });
             header.col(|ui| {
@@ -214,6 +220,7 @@ fn draw_today_schedule(
                         });
                         row.col(|_ui| {});
                         row.col(|_ui| {});
+                        row.col(|_ui| {});
                     }
                     ScheduleRow::Task { index, start } => {
                         let Some(task) = state.visible_tasks.get(index) else {
@@ -225,6 +232,10 @@ fn draw_today_schedule(
                         let estimate = task
                             .estimated_minutes
                             .map(crate::ui::format_estimate)
+                            .unwrap_or_default();
+                        let priority = task
+                            .priority
+                            .map(|p| p.to_string())
                             .unwrap_or_default();
                         let project = project_display_name(task.project_id, &state.projects);
                         let is_highlighted = state.highlighted_task == Some(task_id);
@@ -266,6 +277,9 @@ fn draw_today_schedule(
                         });
                         row.col(|ui| {
                             ui.weak(estimate);
+                        });
+                        row.col(|ui| {
+                            ui.weak(priority);
                         });
                         row.col(|ui| {
                             ui.weak(project);
@@ -314,6 +328,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
             .column(Column::remainder()) // title
             .column(Column::auto().at_least(90.0)) // due date
             .column(Column::auto().at_least(70.0)) // estimate
+            .column(Column::auto().at_least(60.0)) // priority
             .column(Column::initial(project_col_width)) // project
             .header(28.0, |mut header| {
                 header.col(|ui| {
@@ -330,6 +345,11 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                 header.col(|ui| {
                     if sort_header(ui, "Estimate", TaskSortKey::Estimate, state).clicked() {
                         sort_clicked = Some(TaskSortKey::Estimate);
+                    }
+                });
+                header.col(|ui| {
+                    if sort_header(ui, "Priority", TaskSortKey::Priority, state).clicked() {
+                        sort_clicked = Some(TaskSortKey::Priority);
                     }
                 });
                 header.col(|ui| {
@@ -353,6 +373,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                         .estimated_minutes
                         .map(crate::ui::format_estimate)
                         .unwrap_or_default();
+                    let priority = task.priority.map(|p| p.to_string()).unwrap_or_default();
                     let project = project_name(task.project_id, state);
                     let is_highlighted = state.highlighted_task == Some(task_id);
                     let is_open = state.selection == Selection::Task(task_id);
@@ -393,6 +414,9 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                     });
                     row.col(|ui| {
                         ui.weak(estimate);
+                    });
+                    row.col(|ui| {
+                        ui.weak(priority);
                     });
                     row.col(|ui| {
                         ui.weak(project);

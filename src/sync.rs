@@ -47,6 +47,11 @@ pub struct SyncTask {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub estimated_minutes: Option<i64>,
+    /// Lower is higher priority; `None` = unset. `#[serde(default)]` so
+    /// payloads from an older peer that predates the field still
+    /// deserialize — see `recurrence_weekday_mask`.
+    #[serde(default)]
+    pub priority: Option<i64>,
     pub recurrence_interval: Option<u32>,
     pub recurrence_unit: Option<String>,
     /// Mon-first weekday bitmask restricting which days a repeat lands on
@@ -70,6 +75,7 @@ impl From<&Task> for SyncTask {
             created_at: t.created_at,
             updated_at: t.updated_at,
             estimated_minutes: t.estimated_minutes,
+            priority: t.priority,
             recurrence_interval: t.recurrence.map(|r| r.interval),
             recurrence_unit: t.recurrence.map(|r| r.unit.as_str().to_string()),
             recurrence_weekday_mask: t.recurrence.and_then(|r| r.weekdays).map(|w| w.to_mask()),
@@ -110,6 +116,7 @@ impl SyncTask {
             created_at: self.created_at,
             updated_at: self.updated_at,
             estimated_minutes: self.estimated_minutes,
+            priority: self.priority,
             recurrence,
         })
     }
@@ -519,6 +526,36 @@ mod tests {
 
         let back = wire.into_task(&HashSet::new()).unwrap();
         assert_eq!(back.recurrence, task.recurrence);
+    }
+
+    #[test]
+    fn sync_task_carries_priority_both_ways() {
+        let mut task = Task::new_inbox("triage");
+        task.priority = Some(2);
+
+        let wire = SyncTask::from(&task);
+        assert_eq!(wire.priority, Some(2));
+
+        let back = wire.into_task(&HashSet::new()).unwrap();
+        assert_eq!(back.priority, Some(2));
+    }
+
+    #[test]
+    fn sync_task_from_a_peer_predating_the_priority_field_still_deserializes() {
+        // No `priority` key — `#[serde(default)]` fills None.
+        let json = r#"{
+            "id": "3d2e1f00-0000-4000-8000-000000000000",
+            "title": "old task", "notes": "", "project_id": null,
+            "due_date": null, "defer_date": null, "completed": false,
+            "completed_at": null,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            "estimated_minutes": null,
+            "recurrence_interval": null, "recurrence_unit": null
+        }"#;
+        let wire: SyncTask = serde_json::from_str(json).unwrap();
+        assert_eq!(wire.priority, None);
+        let task = wire.into_task(&HashSet::new()).unwrap();
+        assert_eq!(task.priority, None);
     }
 
     #[test]

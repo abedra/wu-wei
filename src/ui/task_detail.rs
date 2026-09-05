@@ -157,6 +157,31 @@ fn estimate_field(ui: &mut egui::Ui, minutes: &mut Option<i64>) -> bool {
     changed
 }
 
+/// Optional priority: lower numbers are higher priority, ties are allowed.
+/// Same checkbox-to-enable shape as [`estimate_field`]: unchecking clears
+/// it, checking seeds a default of 3.
+fn priority_field(ui: &mut egui::Ui, priority: &mut Option<i64>) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let mut has_priority = priority.is_some();
+        if ui.checkbox(&mut has_priority, "Priority").changed() {
+            *priority = has_priority.then_some(3);
+            changed = true;
+        }
+        if let Some(p) = priority {
+            let mut value = (*p).max(1);
+            if ui
+                .add(egui::DragValue::new(&mut value).range(1..=999))
+                .changed()
+            {
+                *p = value.max(1);
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
 fn date_field(
     ui: &mut egui::Ui,
     label: &str,
@@ -249,6 +274,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
         dirty |= date_field(ui, "Defer date", &mut buf.defer_date, false);
         dirty |= recurrence_field(ui, &mut buf.recurrence, &mut buf.due_date);
         dirty |= estimate_field(ui, &mut buf.estimated_minutes);
+        dirty |= priority_field(ui, &mut buf.priority);
 
         let mut completed = buf.completed;
         if ui.checkbox(&mut completed, "Completed").changed() {

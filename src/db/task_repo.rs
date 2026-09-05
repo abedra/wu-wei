@@ -22,9 +22,9 @@ pub fn create(conn: &Connection, task: &Task) -> DbResult<()> {
     conn.execute(
         "INSERT INTO tasks (id, title, notes, project_id, due_date, defer_date,
                              completed, completed_at, created_at, updated_at,
-                             estimated_minutes, recurrence_interval, recurrence_unit,
+                             estimated_minutes, priority, recurrence_interval, recurrence_unit,
                              recurrence_weekday_mask)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             task.id.0.to_string(),
             task.title,
@@ -37,6 +37,7 @@ pub fn create(conn: &Connection, task: &Task) -> DbResult<()> {
             task.created_at,
             Utc::now(),
             task.estimated_minutes,
+            task.priority,
             task.recurrence.map(|r| r.interval),
             task.recurrence.map(|r| r.unit.as_str()),
             weekday_mask(task),
@@ -51,8 +52,8 @@ pub fn update(conn: &Connection, task: &Task) -> DbResult<()> {
         "UPDATE tasks SET title = ?2, notes = ?3, project_id = ?4, due_date = ?5,
                            defer_date = ?6, completed = ?7,
                            completed_at = ?8, updated_at = ?9, estimated_minutes = ?10,
-                           recurrence_interval = ?11, recurrence_unit = ?12,
-                           recurrence_weekday_mask = ?13
+                           priority = ?11, recurrence_interval = ?12, recurrence_unit = ?13,
+                           recurrence_weekday_mask = ?14
          WHERE id = ?1",
         params![
             task.id.0.to_string(),
@@ -65,6 +66,7 @@ pub fn update(conn: &Connection, task: &Task) -> DbResult<()> {
             task.completed_at,
             Utc::now(),
             task.estimated_minutes,
+            task.priority,
             task.recurrence.map(|r| r.interval),
             task.recurrence.map(|r| r.unit.as_str()),
             weekday_mask(task),
@@ -113,15 +115,16 @@ pub fn upsert_synced(conn: &Connection, task: &Task) -> DbResult<()> {
     conn.execute(
         "INSERT INTO tasks (id, title, notes, project_id, due_date, defer_date,
                              completed, completed_at, created_at, updated_at,
-                             estimated_minutes, recurrence_interval, recurrence_unit,
+                             estimated_minutes, priority, recurrence_interval, recurrence_unit,
                              recurrence_weekday_mask)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(id) DO UPDATE SET
              title = excluded.title, notes = excluded.notes,
              project_id = excluded.project_id, due_date = excluded.due_date,
              defer_date = excluded.defer_date, completed = excluded.completed,
              completed_at = excluded.completed_at, updated_at = excluded.updated_at,
              estimated_minutes = excluded.estimated_minutes,
+             priority = excluded.priority,
              recurrence_interval = excluded.recurrence_interval,
              recurrence_unit = excluded.recurrence_unit,
              recurrence_weekday_mask = excluded.recurrence_weekday_mask",
@@ -137,6 +140,7 @@ pub fn upsert_synced(conn: &Connection, task: &Task) -> DbResult<()> {
             task.created_at,
             task.updated_at,
             task.estimated_minutes,
+            task.priority,
             task.recurrence.map(|r| r.interval),
             task.recurrence.map(|r| r.unit.as_str()),
             weekday_mask(task),
@@ -161,7 +165,7 @@ pub fn get(conn: &Connection, id: TaskId) -> DbResult<Option<Task>> {
         "SELECT id, title, notes, project_id, due_date, defer_date,
                 completed, completed_at, created_at, updated_at,
                 estimated_minutes, recurrence_interval, recurrence_unit,
-                recurrence_weekday_mask
+                recurrence_weekday_mask, priority
          FROM tasks WHERE id = ?1",
         params![id.0.to_string()],
         row_to_task,
@@ -305,7 +309,7 @@ fn list_where(
         "SELECT id, title, notes, project_id, due_date, defer_date,
                 completed, completed_at, created_at, updated_at,
                 estimated_minutes, recurrence_interval, recurrence_unit,
-                recurrence_weekday_mask
+                recurrence_weekday_mask, priority
          FROM tasks WHERE {where_clause} ORDER BY {order_by}"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -356,6 +360,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         created_at,
         updated_at: updated_at.unwrap_or(created_at),
         estimated_minutes: row.get(10)?,
+        priority: row.get(14)?,
         recurrence,
     })
 }
@@ -600,6 +605,22 @@ mod tests {
         let result = list_completed_since(&conn, now - Duration::days(7)).unwrap();
         let titles: Vec<&str> = result.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(titles, vec!["finished a report"]);
+    }
+
+    #[test]
+    fn priority_round_trips_through_create_get_and_update() {
+        let conn = db::open_in_memory().unwrap();
+        let mut task = Task::new_inbox("triage the inbox");
+        task.priority = Some(1);
+        create(&conn, &task).unwrap();
+
+        let fetched = get(&conn, task.id).unwrap().unwrap();
+        assert_eq!(fetched.priority, Some(1));
+
+        task.priority = None;
+        update(&conn, &task).unwrap();
+        let fetched = get(&conn, task.id).unwrap().unwrap();
+        assert_eq!(fetched.priority, None);
     }
 
     #[test]

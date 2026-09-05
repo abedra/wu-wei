@@ -223,6 +223,10 @@ pub struct Task {
     /// `sync` to pick the newer side of a conflicting edit.
     pub updated_at: DateTime<Utc>,
     pub estimated_minutes: Option<i64>,
+    /// Lower numbers are higher priority; ties are allowed. `None` means no
+    /// priority has been set. Used to break ties among tasks competing for
+    /// the same slot in the Today schedule — see `schedule::plan_today`.
+    pub priority: Option<i64>,
     pub recurrence: Option<Recurrence>,
 }
 
@@ -241,6 +245,7 @@ impl Task {
             created_at: now,
             updated_at: now,
             estimated_minutes: None,
+            priority: None,
             recurrence: None,
         }
     }
