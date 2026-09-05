@@ -60,6 +60,8 @@ const SHORTCUT_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("Space", "Toggle complete"),
             ("M", "Move to project"),
             ("D", "Set due date"),
+            ("E", "Set estimate"),
+            ("P", "Set priority"),
             ("Cmd+Backspace", "Delete the highlighted task"),
         ],
     ),

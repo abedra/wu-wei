@@ -17,6 +17,7 @@ pub fn handle(ctx: &egui::Context, state: &mut AppState) {
     handle_project_picker(ctx, state);
     handle_due_date_picker(ctx, state);
     handle_estimate_picker(ctx, state);
+    handle_priority_picker(ctx, state);
     handle_sidebar_navigation(ctx, state);
     handle_focus_sidebar(ctx, state);
     handle_task_navigation(ctx, state);
@@ -368,6 +369,44 @@ fn handle_estimate_picker(ctx: &egui::Context, state: &mut AppState) {
         && state.highlighted_task.is_some()
     {
         state.open_estimate_picker();
+    }
+}
+
+/// `P` opens a keyboard-driven priority picker for the highlighted task,
+/// with quick presets (1 through 5, or no priority) plus a free-text field
+/// for a number outside that range, parsed locally — no AI involved. Same
+/// open/navigate/confirm/cancel shape as [`handle_estimate_picker`].
+fn handle_priority_picker(ctx: &egui::Context, state: &mut AppState) {
+    if state.priority_picker.is_some() {
+        // Escape always bails.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            state.close_priority_picker();
+            return;
+        }
+        // While the text field has keyboard focus, it owns arrows/Enter (its
+        // own Enter-submit lives in `ui::priority_picker`).
+        if ctx.memory(|m| m.focused()).is_some() {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
+            state.move_priority_picker_highlight(1);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
+            state.move_priority_picker_highlight(-1);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+            state.confirm_priority_picker();
+        }
+        return;
+    }
+
+    if state.any_picker_open() || ctx.memory(|m| m.focused()).is_some() {
+        return;
+    }
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::P))
+        && state.highlighted_task.is_some()
+    {
+        state.open_priority_picker();
     }
 }
 

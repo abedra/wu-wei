@@ -5,6 +5,7 @@ pub mod estimate_picker;
 pub mod icon;
 pub mod new_project;
 pub mod project_picker;
+pub mod priority_picker;
 pub mod project_view;
 pub mod quick_capture;
 pub mod settings;

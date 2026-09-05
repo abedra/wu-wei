@@ -165,6 +165,40 @@ pub fn estimate_picker_options() -> Vec<(String, Option<i64>)> {
     ]
 }
 
+/// A small keyboard-driven picker for setting a task's priority.
+/// `highlighted` indexes into [`priority_picker_options`].
+pub struct PriorityPickerState {
+    pub task_id: TaskId,
+    pub highlighted: usize,
+    /// Free-text field for a priority outside the quick presets, parsed
+    /// locally by [`parse_priority`] — no AI involved, same shape as
+    /// `EstimatePickerState::text_input`.
+    pub text_input: String,
+    /// The last typed-priority attempt's failure, shown inline in the picker.
+    pub error: Option<String>,
+}
+
+/// Quick priority choices offered by the picker, paired with the value each
+/// resolves to (`None` clears the priority). Lower numbers are higher
+/// priority — see `domain::task::Task::priority`.
+pub fn priority_picker_options() -> Vec<(String, Option<i64>)> {
+    vec![
+        ("No Priority".to_string(), None),
+        ("1 (Highest)".to_string(), Some(1)),
+        ("2".to_string(), Some(2)),
+        ("3".to_string(), Some(3)),
+        ("4".to_string(), Some(4)),
+        ("5 (Lowest)".to_string(), Some(5)),
+    ]
+}
+
+/// Parses a typed priority: a bare positive integer, e.g. "1", "7". Returns
+/// `None` for anything else (blank, non-numeric, zero, negative).
+pub fn parse_priority(text: &str) -> Option<i64> {
+    let n: i64 = text.trim().parse().ok()?;
+    (n > 0).then_some(n)
+}
+
 /// Parses a short estimate phrase into whole minutes. Accepts a bare number
 /// as minutes ("90"), an `h`/`m` combo ("1h", "1h30m", "45m", "2 hours"),
 /// or decimal hours ("1.5h"). Returns `None` when nothing sensible can be
@@ -519,6 +553,7 @@ pub struct AppState {
     pub project_picker: Option<ProjectPickerState>,
     pub due_date_picker: Option<DueDatePickerState>,
     pub estimate_picker: Option<EstimatePickerState>,
+    pub priority_picker: Option<PriorityPickerState>,
     /// Whether keyboard control is currently on the sidebar (see
     /// [`AppState::focus_sidebar`]): Up/Down step through perspectives instead
     /// of the task list, and other task shortcuts (Space, M, D, ...) stand down.
@@ -648,6 +683,7 @@ impl AppState {
             project_picker: None,
             due_date_picker: None,
             estimate_picker: None,
+            priority_picker: None,
             sidebar_focused: false,
             detail_panel_open: false,
             archive_confirm_open: false,
@@ -2030,12 +2066,14 @@ impl AppState {
         self.refresh_visible_tasks();
     }
 
-    /// Whether any keyboard-driven picker (project, due date, or estimate) is
-    /// currently open, so callers can avoid opening a second one on top of it.
+    /// Whether any keyboard-driven picker (project, due date, estimate, or
+    /// priority) is currently open, so callers can avoid opening a second one
+    /// on top of it.
     pub fn any_picker_open(&self) -> bool {
         self.project_picker.is_some()
             || self.due_date_picker.is_some()
             || self.estimate_picker.is_some()
+            || self.priority_picker.is_some()
             || self.quick_capture_open
             || self.new_project_popup_open
             || self.settings.is_some()
@@ -2491,6 +2529,113 @@ impl AppState {
             return;
         };
         task.estimated_minutes = minutes;
+        if let Err(e) = task_repo::update(&self.conn, &task) {
+            self.error_message = Some(e.to_string());
+            return;
+        }
+        self.refresh_visible_tasks();
+    }
+
+    /// Opens the keyboard-driven priority picker for the highlighted task,
+    /// pre-highlighting whichever quick option matches its current priority
+    /// (falling back to "No Priority" if it doesn't match one exactly).
+    pub fn open_priority_picker(&mut self) {
+        let Some(task_id) = self.highlighted_task else {
+            return;
+        };
+        let current = self
+            .visible_tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .and_then(|t| t.priority);
+        let highlighted = priority_picker_options()
+            .iter()
+            .position(|(_, priority)| *priority == current)
+            .unwrap_or(0);
+        self.priority_picker = Some(PriorityPickerState {
+            task_id,
+            highlighted,
+            text_input: String::new(),
+            error: None,
+        });
+    }
+
+    pub fn close_priority_picker(&mut self) {
+        self.priority_picker = None;
+    }
+
+    pub fn move_priority_picker_highlight(&mut self, delta: i32) {
+        let Some(picker) = &mut self.priority_picker else {
+            return;
+        };
+        let max = priority_picker_options().len() as i32 - 1;
+        picker.highlighted = (picker.highlighted as i32 + delta).clamp(0, max) as usize;
+    }
+
+    /// Confirms the picker's currently highlighted row.
+    pub fn confirm_priority_picker(&mut self) {
+        let Some(picker) = self.priority_picker.take() else {
+            return;
+        };
+        self.apply_picked_priority(picker.task_id, picker.highlighted);
+    }
+
+    /// Confirms a specific row directly, e.g. on click (bypassing `highlighted`).
+    pub fn pick_priority_in_picker(&mut self, index: usize) {
+        let Some(picker) = self.priority_picker.take() else {
+            return;
+        };
+        self.apply_picked_priority(picker.task_id, index);
+    }
+
+    fn apply_picked_priority(&mut self, task_id: TaskId, index: usize) {
+        let Some((_, priority)) = priority_picker_options().get(index).cloned() else {
+            return;
+        };
+        self.set_task_priority(task_id, priority);
+    }
+
+    /// Enter in the picker's free-text field: parses the typed number
+    /// locally and applies it. A no-op when the field is blank; sets an
+    /// inline error when it can't be read.
+    pub fn submit_priority_picker_text(&mut self) {
+        let Some(picker) = &mut self.priority_picker else {
+            return;
+        };
+        let text = picker.text_input.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        match parse_priority(&text) {
+            Some(priority) => {
+                let task_id = picker.task_id;
+                self.priority_picker = None;
+                self.set_task_priority(task_id, Some(priority));
+            }
+            None => {
+                picker.error =
+                    Some("Couldn't read a priority from that — try a number like \"1\".".to_string());
+            }
+        }
+    }
+
+    /// Writes `priority` (`None` clears it) onto `task_id`, whether it's
+    /// currently open in the detail editor or only in the list — the shared
+    /// tail of both the quick-option picker and its typed field, mirroring
+    /// `set_task_estimate`.
+    fn set_task_priority(&mut self, task_id: TaskId, priority: Option<i64>) {
+        if let Some(buf) = &mut self.task_edit_buffer
+            && buf.id == task_id
+        {
+            buf.priority = priority;
+            self.save_task_edits();
+            return;
+        }
+
+        let Some(mut task) = self.visible_tasks.iter().find(|t| t.id == task_id).cloned() else {
+            return;
+        };
+        task.priority = priority;
         if let Err(e) = task_repo::update(&self.conn, &task) {
             self.error_message = Some(e.to_string());
             return;
@@ -3906,6 +4051,98 @@ mod tests {
 
         let picker = state.estimate_picker.as_ref().unwrap();
         assert!(picker.error.is_some());
+    }
+
+    #[test]
+    fn priority_picker_options_lists_no_priority_first() {
+        let options = priority_picker_options();
+        assert_eq!(options[0], ("No Priority".to_string(), None));
+        assert_eq!(options[1].1, Some(1));
+    }
+
+    #[test]
+    fn parse_priority_reads_a_bare_positive_integer() {
+        assert_eq!(parse_priority("1"), Some(1));
+        assert_eq!(parse_priority(" 7 "), Some(7));
+        assert_eq!(parse_priority(""), None);
+        assert_eq!(parse_priority("0"), None);
+        assert_eq!(parse_priority("-1"), None);
+        assert_eq!(parse_priority("soon"), None);
+    }
+
+    #[test]
+    fn priority_picker_sets_priority_on_highlighted_task_without_opening_details() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "draft proposal".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+
+        state.move_highlight(1);
+        assert_eq!(state.selection, Selection::None);
+
+        state.open_priority_picker();
+        assert!(state.priority_picker.is_some());
+        state.move_priority_picker_highlight(1); // 0 = None, 1 = "1 (Highest)"
+        state.confirm_priority_picker();
+
+        assert!(state.priority_picker.is_none());
+        let updated = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert_eq!(updated.priority, Some(1));
+    }
+
+    #[test]
+    fn priority_picker_text_field_parses_a_typed_value() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "draft proposal".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        state.move_highlight(1);
+        state.open_priority_picker();
+
+        state.priority_picker.as_mut().unwrap().text_input = "9".to_string();
+        state.submit_priority_picker_text();
+
+        assert!(state.priority_picker.is_none());
+        let updated = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert_eq!(updated.priority, Some(9));
+    }
+
+    #[test]
+    fn priority_picker_text_field_reports_an_unreadable_value() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "draft proposal".to_string();
+        state.quick_capture_submit();
+        state.move_highlight(1);
+        state.open_priority_picker();
+
+        state.priority_picker.as_mut().unwrap().text_input = "whenever".to_string();
+        state.submit_priority_picker_text();
+
+        let picker = state.priority_picker.as_ref().unwrap();
+        assert!(picker.error.is_some());
+    }
+
+    #[test]
+    fn priority_picker_edits_the_open_detail_buffer_when_the_task_is_selected() {
+        // Mirrors `set_task_estimate`'s dual write path: if the task is
+        // currently open in the detail editor, the picker must go through
+        // that buffer (and `save_task_edits`) rather than writing around it,
+        // or the next edit made in the still-open panel would clobber this
+        // one when it saves.
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.quick_entry_buffer = "draft proposal".to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        state.select_task(task_id);
+
+        state.move_highlight(0);
+        state.open_priority_picker();
+        state.move_priority_picker_highlight(1); // "1 (Highest)"
+        state.confirm_priority_picker();
+
+        assert_eq!(state.task_edit_buffer.as_ref().unwrap().priority, Some(1));
+        let updated = task_repo::get(&state.conn, task_id).unwrap().unwrap();
+        assert_eq!(updated.priority, Some(1));
     }
 
     #[test]
