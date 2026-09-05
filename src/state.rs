@@ -1349,6 +1349,7 @@ impl AppState {
                 title: t.title.clone(),
                 project: t.project_id.and_then(&project_name),
                 due_date: t.due_date,
+                estimated_minutes: t.estimated_minutes,
             })
             .collect();
 

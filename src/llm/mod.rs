@@ -42,12 +42,15 @@ pub struct ChatTurn {
 
 /// A task summary handed to the model as the working set it can act on —
 /// deliberately just enough to reference and reason about a task, not a full
-/// `Task` (no notes/timestamps/estimated_minutes).
+/// `Task` (no notes/timestamps). `estimated_minutes` is included so the
+/// model can answer time-commitment questions (e.g. "how much time do I
+/// have committed today?").
 pub struct ChatTaskSummary {
     pub id: TaskId,
     pub title: String,
     pub project: Option<String>,
     pub due_date: Option<NaiveDate>,
+    pub estimated_minutes: Option<i64>,
 }
 
 /// A task the user finished recently, handed to the model so it can write a

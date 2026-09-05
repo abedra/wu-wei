@@ -329,6 +329,7 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
                     "title": t.title,
                     "project": t.project,
                     "due_date": t.due_date.map(|d| d.format("%Y-%m-%d").to_string()),
+                    "estimated_minutes": t.estimated_minutes,
                 })
             })
             .collect::<Vec<_>>(),
@@ -352,8 +353,16 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
          your own calculation. Existing projects: \
          {projects}. Here is the user's current set of open (not \
          completed) tasks as JSON — only ever reference a task by an \"id\" value copied \
-         verbatim from this list (or from the completed-tasks list below), never invent one: \
-         {tasks_json}\n\n\
+         verbatim from this list (or from the completed-tasks list below), never invent one. \
+         Each task's \"estimated_minutes\" is the user's own time estimate for it in minutes, \
+         or null if they haven't set one: {tasks_json}\n\n\
+         When the user asks how much time they have committed, scheduled, or planned for a \
+         given day (e.g. \"how much time do I have committed today?\", \"what's my load \
+         tomorrow?\", \"how booked is Friday?\"), sum \"estimated_minutes\" over the open tasks \
+         due that day, skipping any task whose estimate is null; state the total in your reply \
+         (e.g. \"2h 15m\") and, if any of that day's tasks have no estimate, say how many so \
+         the user knows they're not counted. This is a question, so answer in your reply text \
+         and return an empty actions list — never guess an estimate for a task that has none.\n\n\
          Here are the tasks the user has completed since {completed_since} (i.e. this past \
          week), as JSON — each with a \"title\", optional \"project\", a \"completed_on\" date, \
          and an \"id\" you may use for a follow-up action like reopen_task. Routine recurring \
@@ -751,6 +760,31 @@ mod tests {
         assert!(prompt.contains("\"title\":\"Dentist\""));
         assert!(prompt.contains("\"time\":\"2:00 PM\""));
         assert!(prompt.contains("\"location\":\"123 Main St\""));
+    }
+
+    #[test]
+    fn chat_system_prompt_includes_each_tasks_estimated_minutes() {
+        let mut context = chat_context(NaiveDate::from_ymd_opt(2026, 8, 19).unwrap());
+        context.tasks = vec![
+            super::super::ChatTaskSummary {
+                id: TaskId::new(),
+                title: "Write report".to_string(),
+                project: None,
+                due_date: None,
+                estimated_minutes: Some(45),
+            },
+            super::super::ChatTaskSummary {
+                id: TaskId::new(),
+                title: "Someday maybe".to_string(),
+                project: None,
+                due_date: None,
+                estimated_minutes: None,
+            },
+        ];
+        let prompt = chat_system_prompt(&context);
+        assert!(prompt.contains("\"estimated_minutes\":45"));
+        assert!(prompt.contains("\"estimated_minutes\":null"));
+        assert!(prompt.contains("how much time they have committed"));
     }
 
     #[test]
