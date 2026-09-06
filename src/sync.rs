@@ -312,7 +312,7 @@ pub fn merge(conn: &Connection, local: &Snapshot, remotes: &[Snapshot]) -> DbRes
         |p| p.updated_at,
         // Projects have no completion state, so this is purely the same
         // deterministic, order-independent fallback tasks use below.
-        |cand, existing| deterministic_tiebreak(cand, existing),
+        deterministic_tiebreak,
         &project_tombstones,
     );
     let local_project_ids: HashSet<&str> = local.projects.iter().map(|p| p.id.as_str()).collect();
@@ -656,7 +656,10 @@ mod tests {
         version_a.priority = Some(1);
         let mut version_b = base.clone();
         version_b.priority = Some(4);
-        assert_eq!(version_a.updated_at, version_b.updated_at, "test setup: must tie");
+        assert_eq!(
+            version_a.updated_at, version_b.updated_at,
+            "test setup: must tie"
+        );
 
         // Merge with `version_a` actually stored locally, `version_b` arriving
         // as a remote snapshot... `upsert_synced` (not `create`) so the row's

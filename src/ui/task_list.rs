@@ -239,10 +239,7 @@ fn draw_today_schedule(
                             .estimated_minutes
                             .map(crate::ui::format_estimate)
                             .unwrap_or_default();
-                        let priority = task
-                            .priority
-                            .map(|p| p.to_string())
-                            .unwrap_or_default();
+                        let priority = task.priority.map(|p| p.to_string()).unwrap_or_default();
                         let project = project_display_name(task.project_id, &state.projects);
                         let is_highlighted = state.highlighted_task == Some(task_id);
                         let is_open = state.selection == Selection::Task(task_id);

@@ -2612,8 +2612,9 @@ impl AppState {
                 self.set_task_priority(task_id, Some(priority));
             }
             None => {
-                picker.error =
-                    Some("Couldn't read a priority from that — try a number like \"1\".".to_string());
+                picker.error = Some(
+                    "Couldn't read a priority from that — try a number like \"1\".".to_string(),
+                );
             }
         }
     }
