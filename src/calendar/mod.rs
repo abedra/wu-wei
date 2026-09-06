@@ -11,8 +11,15 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 
 use crate::db::settings_repo;
 
-/// One event on the connected Google Calendar for a single day's fetch (see
-/// `run_async`) — never persisted locally, re-fetched on every sync.
+/// How many days of events (starting today) each fetch pulls. The Today
+/// view only ever shows today's, but the chat assistant is handed the whole
+/// window so it can answer "what's on my calendar tomorrow?" and similar —
+/// see `AppState::build_chat_context`. Kept to a week so the window lines up
+/// with the chat prompt's weekday→date lookup (`prompt::weekday_reference`).
+pub const LOOKAHEAD_DAYS: i64 = 7;
+
+/// One event on the connected Google Calendar for a single fetch's window
+/// (see `run_async`) — never persisted locally, re-fetched on every sync.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CalendarEvent {
     pub id: String,
@@ -97,8 +104,9 @@ impl GoogleCalendarConfig {
 }
 
 /// Spawns a background thread that (refreshing the access token first if
-/// it's expired or missing) fetches `today`'s events from the connected
-/// Google Calendar. Mirrors `sync::run_async`: opens its own connection to
+/// it's expired or missing) fetches the next [`LOOKAHEAD_DAYS`] days of
+/// events (starting `today`) from the connected Google Calendar. Mirrors
+/// `sync::run_async`: opens its own connection to
 /// `db_path` so a refreshed token can be persisted from the background
 /// thread even while the UI thread's connection is also live, delivering
 /// the result over the returned channel for the caller to `try_recv` once
@@ -141,7 +149,7 @@ fn fetch(
         .map_err(|e| e.to_string())?;
     }
 
-    google::fetch_today_events(&config.access_token, today)
+    google::fetch_events(&config.access_token, today, LOOKAHEAD_DAYS)
 }
 
 #[cfg(test)]

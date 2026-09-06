@@ -49,23 +49,25 @@ impl RawEventTime {
     }
 }
 
-/// Fetches `today`'s events (local midnight to the next local midnight) from
-/// the connected Google account's primary calendar. Blocking by design —
-/// always called from `calendar::run_async`'s background thread, mirroring
-/// how `llm::Provider` implementations are blocking (see `src/llm/mod.rs`).
-pub fn fetch_today_events(
+/// Fetches events from `start`'s local midnight through `days` days later
+/// (so `days == 1` is just today) from the connected Google account's
+/// primary calendar. Blocking by design — always called from
+/// `calendar::run_async`'s background thread, mirroring how `llm::Provider`
+/// implementations are blocking (see `src/llm/mod.rs`).
+pub fn fetch_events(
     access_token: &str,
-    today: NaiveDate,
+    start: NaiveDate,
+    days: i64,
 ) -> Result<Vec<CalendarEvent>, String> {
-    let start_of_day = today
+    let window_start = start
         .and_hms_opt(0, 0, 0)
         .and_then(|dt| Local.from_local_datetime(&dt).single())
-        .ok_or_else(|| "couldn't resolve today's local time window".to_string())?;
-    let end_of_day = start_of_day + Duration::days(1);
+        .ok_or_else(|| "couldn't resolve the local time window".to_string())?;
+    let window_end = window_start + Duration::days(days.max(1));
 
     let mut response = ureq::get(EVENTS_URL)
-        .query("timeMin", start_of_day.to_rfc3339())
-        .query("timeMax", end_of_day.to_rfc3339())
+        .query("timeMin", window_start.to_rfc3339())
+        .query("timeMax", window_end.to_rfc3339())
         .query("singleEvents", "true")
         .query("orderBy", "startTime")
         .header("Authorization", format!("Bearer {access_token}"))

@@ -65,12 +65,15 @@ pub struct ChatCompletedTaskSummary {
     pub completed_on: NaiveDate,
 }
 
-/// Today's Google Calendar events, for the model's awareness only — there's
+/// A Google Calendar event from the connected calendar's next-week window
+/// (see `calendar::LOOKAHEAD_DAYS`), for the model's awareness only — there's
 /// no action to create/move/delete a calendar event, so this is handed over
 /// purely as read-only context (e.g. "am I free this afternoon?", "what's on
-/// my plate today?"). `time` is already formatted in the user's local time
-/// (or "All day"), matching what `ui::task_list` shows.
+/// my plate tomorrow?"). `date` is the event's local calendar day and `time`
+/// is already formatted in the user's local time (or "All day"), matching
+/// what `ui::task_list` shows.
 pub struct ChatCalendarEventSummary {
+    pub date: NaiveDate,
     pub title: String,
     pub time: String,
     pub location: Option<String>,

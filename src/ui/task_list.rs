@@ -20,10 +20,11 @@ fn draw_calendar_events(ui: &mut egui::Ui, state: &AppState) {
         return;
     }
     let now = Local::now();
+    let today = now.date_naive();
     let current_events: Vec<_> = state
         .calendar_events
         .iter()
-        .filter(|e| schedule::is_current(e, now))
+        .filter(|e| schedule::occurs_on(e, today) && schedule::is_current(e, now))
         .collect();
     ui.group(|ui| {
         ui.horizontal(|ui| {

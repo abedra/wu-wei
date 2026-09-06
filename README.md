@@ -149,3 +149,5 @@ The Today view can show today's events from a Google Calendar (read-only, primar
 
 Once connected, Today's events appear above the task list whenever you're on the Today perspective, refreshing automatically on an interval you set in Settings → Calendar → **Refresh every** (default 5 minutes, 1–1440). The refresh only runs while the Today view is open. Disconnecting from Settings revokes nothing on Google's side — it just clears Wu Wei's saved tokens.
 
+Each refresh also pulls the coming week's events (not just today's) so the AI chat assistant can answer questions like "what's on my calendar tomorrow?" or "how booked is Friday?" — only today's are shown in the Today view.
+

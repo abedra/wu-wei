@@ -629,10 +629,14 @@ pub struct AppState {
     /// simply not shown, not an error, until the user connects it in
     /// Settings.
     pub google_calendar_config: Option<GoogleCalendarConfig>,
-    /// Today's events from the connected calendar, refreshed by
-    /// `run_calendar_sync`/`poll_calendar`. Never persisted — re-fetched on
-    /// every sync, same "external source of truth, local cache only"
-    /// relationship `visible_tasks` has with the database.
+    /// Events from the connected calendar for today through the next week
+    /// (see `calendar::LOOKAHEAD_DAYS`), refreshed by
+    /// `run_calendar_sync`/`poll_calendar`. The Today view and
+    /// `schedule::plan_today` filter this to just today's; the AI chat panel
+    /// (`build_chat_context`) gets the whole window so it can answer
+    /// questions about upcoming days. Never persisted — re-fetched on every
+    /// sync, same "external source of truth, local cache only" relationship
+    /// `visible_tasks` has with the database.
     pub calendar_events: Vec<CalendarEvent>,
     /// Set while a background calendar fetch is in flight; polled once per
     /// frame in `poll_calendar`. Same shape as `sync_pending`/`sync_busy`.
@@ -1449,10 +1453,15 @@ impl AppState {
                 })
             })
             .collect();
+        // `self.calendar_events` reaches a week ahead (see
+        // `calendar::LOOKAHEAD_DAYS`) even though the Today view only shows
+        // today's — the assistant gets the whole window so it can answer
+        // "what's on my calendar tomorrow?".
         let calendar_events = self
             .calendar_events
             .iter()
             .map(|e| ChatCalendarEventSummary {
+                date: e.start.with_timezone(&Local).date_naive(),
                 title: e.title.clone(),
                 time: if e.all_day {
                     "All day".to_string()

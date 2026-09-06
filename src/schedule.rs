@@ -18,7 +18,7 @@
 //!  * A timed event drops off the list entirely once its end time has
 //!    passed — see [`is_current`]. An all-day event never expires this way.
 
-use chrono::{DateTime, Duration, Local, NaiveTime};
+use chrono::{DateTime, Duration, Local, NaiveDate, NaiveTime};
 
 use crate::calendar::CalendarEvent;
 use crate::domain::task::Task;
@@ -63,6 +63,23 @@ pub fn is_current(event: &CalendarEvent, now: DateTime<Local>) -> bool {
     event.all_day || event.end.with_timezone(&Local) > now
 }
 
+/// Whether `event` falls on `day` in local time. The calendar fetch pulls a
+/// week ahead so the chat assistant can see it (see `calendar::LOOKAHEAD_DAYS`),
+/// so the Today view and [`plan_today`] use this to keep to just today's
+/// events. A timed event is placed by its start date; an all-day event —
+/// which may span several days, with `end` anchored to the exclusive
+/// day-after midnight (see `CalendarEvent::all_day`) — counts for every day
+/// in its span.
+pub fn occurs_on(event: &CalendarEvent, day: NaiveDate) -> bool {
+    let start = event.start.with_timezone(&Local).date_naive();
+    if event.all_day {
+        let end = event.end.with_timezone(&Local).date_naive();
+        day >= start && day < end
+    } else {
+        day == start
+    }
+}
+
 /// Builds the interleaved event/task ordering for the Today view. `now` is
 /// the anchor the first task can start at — gaps entirely in the past are
 /// skipped.
@@ -72,10 +89,13 @@ pub fn plan_today(
     now: DateTime<Local>,
 ) -> Vec<ScheduleRow> {
     let mut rows = Vec::with_capacity(events.len() + tasks.len());
+    let today = now.date_naive();
 
-    // All-day events first: shown, but not treated as busy time.
+    // All-day events first: shown, but not treated as busy time. `events`
+    // can reach a week ahead (the chat assistant's window), so filter to
+    // just today's here — see `occurs_on`.
     for (index, event) in events.iter().enumerate() {
-        if event.all_day {
+        if event.all_day && occurs_on(event, today) {
             rows.push(ScheduleRow::Event { index });
         }
     }
@@ -86,7 +106,7 @@ pub fn plan_today(
     let mut timed: Vec<usize> = events
         .iter()
         .enumerate()
-        .filter(|(_, e)| !e.all_day && is_current(e, now))
+        .filter(|(_, e)| !e.all_day && occurs_on(e, today) && is_current(e, now))
         .map(|(i, _)| i)
         .collect();
     timed.sort_by_key(|&i| events[i].start);
@@ -195,8 +215,10 @@ mod tests {
         CalendarEvent {
             id: Uuid::new_v4().to_string(),
             title: title.to_string(),
+            // Google anchors an all-day event's `end` to the exclusive
+            // day-after midnight (see `CalendarEvent::all_day`).
             start: now_at(0, 0).with_timezone(&chrono::Utc),
-            end: now_at(23, 59).with_timezone(&chrono::Utc),
+            end: (now_at(0, 0) + Duration::days(1)).with_timezone(&chrono::Utc),
             all_day: true,
             location: None,
         }
@@ -313,6 +335,34 @@ mod tests {
             titles(&rows, &events, &tasks),
             ["Company holiday", "Errand", "Standup"]
         );
+    }
+
+    #[test]
+    fn events_on_other_days_are_left_out() {
+        // The fetch reaches a week ahead for the chat assistant; the Today
+        // view must still only show today's.
+        let shift = |mut e: CalendarEvent, days: i64| {
+            e.start += Duration::days(days);
+            e.end += Duration::days(days);
+            e
+        };
+        let events = vec![
+            event("Today standup", (10, 0), (10, 30)),
+            shift(event("Tomorrow standup", (10, 0), (10, 30)), 1),
+            shift(all_day("Holiday next week"), 4),
+        ];
+        let rows = plan_today(&events, &[], now_at(9, 0));
+        assert_eq!(titles(&rows, &events, &[]), ["Today standup"]);
+    }
+
+    #[test]
+    fn a_multi_day_all_day_event_still_shows_on_a_middle_day() {
+        let mut vacation = all_day("Vacation");
+        vacation.start -= Duration::days(1);
+        vacation.end += Duration::days(2); // spans yesterday..tomorrow inclusive
+        let events = vec![vacation];
+        let rows = plan_today(&events, &[], now_at(9, 0));
+        assert_eq!(titles(&rows, &events, &[]), ["Vacation"]);
     }
 
     #[test]

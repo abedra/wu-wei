@@ -30,8 +30,9 @@ fn weekday_reference(today: NaiveDate) -> String {
         .join(", ")
 }
 
-/// Today's Google Calendar events, ready to splice into the chat system
-/// prompt as JSON — `[]` when the calendar isn't connected or today's just
+/// The connected Google Calendar's next-week window of events (see
+/// `calendar::LOOKAHEAD_DAYS`), ready to splice into the chat system prompt
+/// as JSON — `[]` when the calendar isn't connected or the window's just
 /// empty, same "absent looks like empty" convention as `tasks_json`.
 fn calendar_events_json(events: &[ChatCalendarEventSummary]) -> String {
     serde_json::to_string(
@@ -39,6 +40,7 @@ fn calendar_events_json(events: &[ChatCalendarEventSummary]) -> String {
             .iter()
             .map(|e| {
                 json!({
+                    "date": e.date.format("%Y-%m-%d").to_string(),
                     "title": e.title,
                     "time": e.time,
                     "location": e.location,
@@ -373,13 +375,19 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
          work by project, write a short readable recap in your reply text, and return an empty \
          actions list — a summary is just something you write, never a set of changes. Only \
          mention that the week was quiet if the list really is empty.\n\n\
-         Here are today's events from the user's connected Google Calendar as JSON (each with \
-         a \"title\", a \"time\" already in the user's local time zone — either a clock time or \
-         \"All day\" — and an optional \"location\"); an empty list just means nothing's on the \
-         calendar today, not that the calendar is disconnected: {calendar_json}\n\n\
+         Here are the events from the user's connected Google Calendar for today through \
+         {calendar_until} as JSON (each with a \"date\" as YYYY-MM-DD, a \"title\", a \"time\" \
+         already in the user's local time zone — either a clock time or \"All day\" — and an \
+         optional \"location\"), sorted earliest first; an empty list just means nothing's on \
+         the calendar in that window, not that the calendar is disconnected. When the user asks \
+         about a day, match on the \"date\" field (resolve \"today\"/\"tomorrow\"/a weekday name \
+         to a date using the lookup above first); a day in that range with no matching event is \
+         genuinely free, but for a day past {calendar_until} say you can only see about a week \
+         out rather than implying it's clear: {calendar_json}\n\n\
          Calendar events are read-only context, never something to act on — there is no action \
          type for creating, moving, or deleting one, so only ever use them to answer questions \
-         about the user's day (e.g. \"what's on my schedule today?\", \"am I free at 3?\") or to \
+         about the user's day (e.g. \"what's on my schedule today?\", \"what do I have \
+         tomorrow?\", \"am I free at 3?\") or to \
          factor into a task suggestion (e.g. avoid suggesting something that overlaps a \
          meeting). Never propose a due_date/time for a task based solely on it landing near a \
          calendar event unless the user actually asked for that.\n\n\
@@ -473,6 +481,8 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
         calendar_json = calendar_json,
         completed_json = completed_json,
         completed_since = context.completed_since.format("%Y-%m-%d"),
+        calendar_until = (context.today + Duration::days(crate::calendar::LOOKAHEAD_DAYS - 1))
+            .format("%Y-%m-%d"),
     )
 }
 
@@ -749,17 +759,31 @@ mod tests {
     }
 
     #[test]
-    fn chat_system_prompt_includes_todays_calendar_events() {
+    fn chat_system_prompt_includes_calendar_events_with_their_dates() {
         let mut context = chat_context(NaiveDate::from_ymd_opt(2026, 8, 19).unwrap());
-        context.calendar_events = vec![ChatCalendarEventSummary {
-            title: "Dentist".to_string(),
-            time: "2:00 PM".to_string(),
-            location: Some("123 Main St".to_string()),
-        }];
+        context.calendar_events = vec![
+            ChatCalendarEventSummary {
+                date: NaiveDate::from_ymd_opt(2026, 8, 19).unwrap(),
+                title: "Dentist".to_string(),
+                time: "2:00 PM".to_string(),
+                location: Some("123 Main St".to_string()),
+            },
+            ChatCalendarEventSummary {
+                date: NaiveDate::from_ymd_opt(2026, 8, 20).unwrap(),
+                title: "Team offsite".to_string(),
+                time: "All day".to_string(),
+                location: None,
+            },
+        ];
         let prompt = chat_system_prompt(&context);
+        assert!(prompt.contains("\"date\":\"2026-08-19\""));
         assert!(prompt.contains("\"title\":\"Dentist\""));
         assert!(prompt.contains("\"time\":\"2:00 PM\""));
         assert!(prompt.contains("\"location\":\"123 Main St\""));
+        assert!(prompt.contains("\"date\":\"2026-08-20\""));
+        assert!(prompt.contains("\"title\":\"Team offsite\""));
+        // The window end is spelled out so the model knows how far it can see.
+        assert!(prompt.contains("today through 2026-08-25"));
     }
 
     #[test]
@@ -791,8 +815,10 @@ mod tests {
     fn chat_system_prompt_shows_an_empty_calendar_as_an_empty_list() {
         let context = chat_context(NaiveDate::from_ymd_opt(2026, 8, 19).unwrap());
         let prompt = chat_system_prompt(&context);
-        assert!(prompt.contains("Google Calendar as JSON"));
-        assert!(prompt.contains("not that the calendar is disconnected: []"));
+        assert!(prompt.contains("connected Google Calendar for today through"));
+        assert!(prompt.contains("in that window, not that the calendar is disconnected"));
+        // The (empty) event list is still spliced in as an empty JSON array.
+        assert!(prompt.contains("rather than implying it's clear: []"));
     }
 
     #[test]
