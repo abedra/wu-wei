@@ -17,6 +17,7 @@ pub fn field_id() -> egui::Id {
 pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     let llm_available = state.llm_available();
     let mut send_clicked = false;
+    let mut stop_clicked = false;
     let mut apply_clicked = false;
     let mut discard_clicked = false;
     let mut weekly_summary_clicked = false;
@@ -72,8 +73,20 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                 });
             }
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            // Right-to-left so the button is placed (and given its width)
+            // before the text edit claims the row — a plain left-to-right
+            // horizontal lets `desired_width(f32::INFINITY)` swallow the
+            // entire row first, pushing the button past the window's right
+            // edge where it's clipped and unclickable.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let enabled = llm_available && !state.chat_busy;
+                if state.chat_busy {
+                    if ui.button("Stop").clicked() {
+                        stop_clicked = true;
+                    }
+                } else if ui.add_enabled(enabled, egui::Button::new("Send")).clicked() {
+                    send_clicked = true;
+                }
                 let response = ui.add_enabled(
                     enabled,
                     egui::TextEdit::singleline(&mut state.chat_input)
@@ -83,7 +96,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                 let enter_pressed = enabled
                     && response.lost_focus()
                     && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if ui.add_enabled(enabled, egui::Button::new("Send")).clicked() || enter_pressed {
+                if enter_pressed {
                     send_clicked = true;
                 }
                 if state.chat_focus_requested {
@@ -142,6 +155,9 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     }
     if send_clicked {
         state.chat_send();
+    }
+    if stop_clicked {
+        state.chat_stop();
     }
     if weekly_summary_clicked {
         state.request_weekly_summary();

@@ -1500,6 +1500,27 @@ impl AppState {
         self.chat_input = half_typed;
     }
 
+    /// The AI panel's "Stop" button: gives up on the in-flight chat request.
+    /// `ureq`'s blocking call has no cancellation hook, so the background
+    /// thread keeps running the HTTP request to completion — but dropping
+    /// `chat_pending` here means nothing is listening on the other end of
+    /// the channel, so whatever it eventually sends (via the `let _ =
+    /// tx.send(...)` in `llm::send_chat_async`) is silently discarded. Same
+    /// mechanism `close_quick_capture` uses for `llm_pending`. This frees the
+    /// input immediately rather than actually terminating the request.
+    pub fn chat_stop(&mut self) {
+        if !self.chat_busy {
+            return;
+        }
+        self.chat_pending = None;
+        self.chat_busy = false;
+        self.chat_focus_requested = true;
+        self.chat_history.push(ChatTurn {
+            role: ChatRole::Assistant,
+            content: "Stopped.".to_string(),
+        });
+    }
+
     /// Polled once per frame from `app.rs`. Non-blocking: does nothing while
     /// the background request is still running.
     pub fn poll_chat(&mut self) {
@@ -3485,6 +3506,40 @@ mod tests {
 
         assert!(!state.chat_busy);
         assert!(state.chat_focus_requested);
+    }
+
+    #[test]
+    fn chat_stop_clears_the_pending_request_and_discards_a_late_reply() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        state.chat_pending = Some(rx);
+        state.chat_busy = true;
+
+        state.chat_stop();
+
+        assert!(!state.chat_busy);
+        assert!(state.chat_pending.is_none());
+        assert!(state.chat_focus_requested);
+        assert_eq!(state.chat_history.last().unwrap().role, ChatRole::Assistant);
+        assert_eq!(state.chat_history.last().unwrap().content, "Stopped.");
+
+        // The background thread's send should be a silent no-op once the
+        // receiver has been dropped — it must not panic.
+        tx.send(Ok(ChatReply {
+            reply: "too late".to_string(),
+            actions: Vec::new(),
+            parse_failures: Vec::new(),
+        }))
+        .ok();
+    }
+
+    #[test]
+    fn chat_stop_is_a_noop_when_nothing_is_in_flight() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+
+        state.chat_stop();
+
+        assert!(state.chat_history.is_empty());
     }
 
     #[test]
