@@ -77,6 +77,7 @@ const SHORTCUT_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     ("Sync", &[("Cmd+Shift+S", "Sync now")]),
+    ("AI", &[("Cmd+J", "Show/hide the AI assistant")]),
     ("Any popup", &[("Enter", "Confirm"), ("Esc", "Cancel")]),
 ];
 

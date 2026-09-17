@@ -583,6 +583,10 @@ pub struct AppState {
     /// frame in `poll_llm`. Dropping it (e.g. on cancel) discards the reply.
     pub llm_pending: Option<Receiver<Result<ParsedTask, String>>>,
     pub llm_busy: bool,
+    /// Whether the AI chat panel is shown at all — toggled by Cmd+J (see
+    /// `ui::shortcuts::handle_toggle_ai_chat`). Ephemeral, like the rest of
+    /// the chat state: always visible again on restart.
+    pub ai_chat_visible: bool,
     /// The AI chat panel's conversation so far, shown in the transcript and
     /// resent as context on every turn. Ephemeral — not persisted to the DB,
     /// cleared on restart.
@@ -696,6 +700,7 @@ impl AppState {
             llm_config: LlmConfig::resolve(&llm_settings),
             llm_pending: None,
             llm_busy: false,
+            ai_chat_visible: true,
             chat_history: Vec::new(),
             chat_input: String::new(),
             chat_pending: None,
@@ -1411,6 +1416,14 @@ impl AppState {
             context,
         ));
         self.chat_busy = true;
+    }
+
+    /// Cmd+J: shows or hides the AI chat panel (see `ui::shortcuts`). Purely
+    /// a display toggle — an in-flight request keeps running and the
+    /// transcript is untouched, so reopening it lands right back where it
+    /// was.
+    pub fn toggle_ai_chat(&mut self) {
+        self.ai_chat_visible = !self.ai_chat_visible;
     }
 
     fn build_chat_context(&self) -> ChatContext {
@@ -3540,6 +3553,24 @@ mod tests {
         state.chat_stop();
 
         assert!(state.chat_history.is_empty());
+    }
+
+    #[test]
+    fn toggle_ai_chat_flips_visibility_without_touching_the_conversation() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        assert!(state.ai_chat_visible);
+        state.chat_history.push(ChatTurn {
+            role: ChatRole::User,
+            content: "hi".to_string(),
+        });
+
+        state.toggle_ai_chat();
+        assert!(!state.ai_chat_visible);
+        assert_eq!(state.chat_history.len(), 1);
+
+        state.toggle_ai_chat();
+        assert!(state.ai_chat_visible);
+        assert_eq!(state.chat_history.len(), 1);
     }
 
     #[test]

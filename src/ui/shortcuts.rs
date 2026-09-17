@@ -25,6 +25,7 @@ pub fn handle(ctx: &egui::Context, state: &mut AppState) {
     handle_perspective_switches(ctx, state);
     handle_delete(ctx, state);
     handle_complete_toggle(ctx, state);
+    handle_toggle_ai_chat(ctx, state);
 }
 
 /// Cmd+, opens Settings — the conventional "Preferences" shortcut. Unlike
@@ -407,6 +408,17 @@ fn handle_priority_picker(ctx: &egui::Context, state: &mut AppState) {
         && state.highlighted_task.is_some()
     {
         state.open_priority_picker();
+    }
+}
+
+/// Cmd+J shows or hides the AI chat panel (see `AppState::toggle_ai_chat`) —
+/// handy for reclaiming the vertical space it takes up without losing the
+/// conversation. Not gated on `any_picker_open`/focus, matching
+/// `handle_sync`'s always-on Cmd+Shift+S.
+fn handle_toggle_ai_chat(ctx: &egui::Context, state: &mut AppState) {
+    let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::J);
+    if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
+        state.toggle_ai_chat();
     }
 }
 
