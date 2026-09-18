@@ -3,8 +3,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
-    ChatAction, ChatCalendarEventSummary, ChatCompletedTaskSummary, ChatContext, ChatReply,
-    ParsedTask, PromptContext,
+    BulkOperation, ChatAction, ChatCalendarEventSummary, ChatCompletedTaskSummary, ChatContext,
+    ChatReply, ParsedTask, PromptContext,
 };
 use crate::domain::task::{Recurrence, RecurrenceUnit, TaskId, WeekdaySet};
 
@@ -458,13 +458,30 @@ pub fn chat_system_prompt(context: &ChatContext) -> String {
          rules as quick capture; title is required, everything else is optional; project must \
          match an existing project exactly or be null, never invent one; this is the only way \
          to add a brand new task — never try to create one by sending other actions against a \
-         task_id that doesn't exist in the list above). create_project/delete_project/\
-         create_task act on a project or a not-yet-existing task, so leave \
-         task_id null for them; every other action, including delete_task, needs a task_id \
-         taken from the open-tasks list above (or, for reopen_task, from the completed-tasks \
-         list). If a command implies several tasks, emit one \
-         action per matching task — except rescheduling every overdue task, which has its own \
-         single reschedule_overdue action (above). If no task/project \
+         task_id that doesn't exist in the list above), \
+         set_estimated_minutes (task_id, estimated_minutes — the user's time estimate for the \
+         task as a whole number of minutes; resolve a phrase like \"2 hours\" to 120 or \"an \
+         hour and a half\" to 90 yourself), clear_estimated_minutes (task_id — removes the \
+         time estimate entirely; distinct from setting it to 0, which means \"no time at \
+         all\" rather than \"unknown\"), \
+         bulk_project_action (project — copied exactly from the existing projects list; \
+         operation — one of complete/delete/move_to_project/move_to_inbox/set_due_date/\
+         clear_due_date; target_project — required only for a move_to_project operation, \
+         copied exactly from the existing projects list; due_date — required only for a \
+         set_due_date operation. Applies to every currently open task in that project — the \
+         app resolves that set itself, the same way reschedule_overdue does, so never also \
+         emit one action per task in the same project for the same change. Only use this when \
+         a command clearly means every/all task in a project (e.g. \"mark everything in \
+         Groceries done\", \"push all the Taxes tasks to Friday\", \"delete everything in Old \
+         Ideas\"); when it names or implies only some of a project's tasks, use per-task \
+         actions instead). create_project/delete_project/\
+         create_task/bulk_project_action act on a project (or a not-yet-existing task), so \
+         leave task_id null for them; every other action, including delete_task, needs a \
+         task_id taken from the open-tasks list above (or, for reopen_task, from the \
+         completed-tasks list). If a command implies several tasks, emit one \
+         action per matching task — except rescheduling every overdue task or acting on every \
+         task in one project, which have their own single reschedule_overdue/\
+         bulk_project_action actions (above). If no task/project \
          clearly matches what a command describes, that's the same kind of uncertainty as \
          above — ask for confirmation rather than guessing which one was meant. Every field \
          an action's type needs (see above) must actually be filled in with a real value, \
@@ -508,18 +525,23 @@ pub fn chat_response_schema() -> Value {
                                 "clear_recurrence", "complete_task", "reopen_task",
                                 "move_to_project", "move_to_inbox",
                                 "create_project", "delete_project",
-                                "delete_task", "create_task"
+                                "delete_task", "create_task",
+                                "set_estimated_minutes", "clear_estimated_minutes",
+                                "bulk_project_action"
                             ]
                         },
                         "task_id": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
                         "due_date": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
                         "project": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
                         "title": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
-                        "recurrence": recurrence_schema()
+                        "recurrence": recurrence_schema(),
+                        "estimated_minutes": { "anyOf": [{ "type": "integer" }, { "type": "null" }] },
+                        "operation": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+                        "target_project": { "anyOf": [{ "type": "string" }, { "type": "null" }] }
                     },
                     "required": [
                         "type", "task_id", "due_date", "project", "title",
-                        "recurrence"
+                        "recurrence", "estimated_minutes", "operation", "target_project"
                     ],
                     "additionalProperties": false
                 }
@@ -539,6 +561,9 @@ pub struct RawChatAction {
     pub project: Option<String>,
     pub title: Option<String>,
     pub recurrence: Option<RawRecurrence>,
+    pub estimated_minutes: Option<i64>,
+    pub operation: Option<String>,
+    pub target_project: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -725,6 +750,54 @@ impl RawChatAction {
                         recurrence: parse_optional_recurrence(self.recurrence)?,
                     },
                 })
+            }
+            "set_estimated_minutes" => {
+                let task_id = parse_required_task_id("set_estimated_minutes", self.task_id)?;
+                let minutes = self.estimated_minutes.ok_or_else(|| {
+                    "model's \"set_estimated_minutes\" action is missing estimated_minutes"
+                        .to_string()
+                })?;
+                if minutes < 0 {
+                    return Err(format!(
+                        "model's \"set_estimated_minutes\" action has a negative \
+                         estimated_minutes {minutes}"
+                    ));
+                }
+                Ok(ChatAction::SetEstimatedMinutes { task_id, minutes })
+            }
+            "clear_estimated_minutes" => Ok(ChatAction::ClearEstimatedMinutes {
+                task_id: parse_required_task_id("clear_estimated_minutes", self.task_id)?,
+            }),
+            "bulk_project_action" => {
+                let project = parse_required_project("bulk_project_action", self.project)?;
+                let operation =
+                    self.operation
+                        .filter(|s| !s.trim().is_empty())
+                        .ok_or_else(|| {
+                            "model's \"bulk_project_action\" action is missing an operation"
+                                .to_string()
+                        })?;
+                let operation = match operation.as_str() {
+                    "complete" => BulkOperation::Complete,
+                    "delete" => BulkOperation::Delete,
+                    "move_to_project" => BulkOperation::MoveToProject(parse_required_project(
+                        "bulk_project_action",
+                        self.target_project,
+                    )?),
+                    "move_to_inbox" => BulkOperation::MoveToInbox,
+                    "set_due_date" => BulkOperation::SetDueDate(parse_required_due_date(
+                        "bulk_project_action",
+                        self.due_date,
+                    )?),
+                    "clear_due_date" => BulkOperation::ClearDueDate,
+                    other => {
+                        return Err(format!(
+                            "model's \"bulk_project_action\" action has an unknown operation \
+                             {other:?}"
+                        ));
+                    }
+                };
+                Ok(ChatAction::BulkProjectAction { project, operation })
             }
             other => Err(format!("model returned an unknown action type {other:?}")),
         }
@@ -993,6 +1066,9 @@ mod tests {
             project: None,
             title: None,
             recurrence: None,
+            estimated_minutes: None,
+            operation: None,
+            target_project: None,
         }
     }
 
@@ -1004,6 +1080,9 @@ mod tests {
             project: None,
             title: None,
             recurrence: None,
+            estimated_minutes: None,
+            operation: None,
+            target_project: None,
         }
     }
 
@@ -1099,6 +1178,129 @@ mod tests {
         let err = chat_action("move_to_project", &id.0.to_string())
             .into_chat_action()
             .unwrap_err();
+        assert!(err.contains("missing a project"));
+    }
+
+    #[test]
+    fn parses_a_set_estimated_minutes_action() {
+        let id = TaskId::new();
+        let mut raw = chat_action("set_estimated_minutes", &id.0.to_string());
+        raw.estimated_minutes = Some(90);
+        let action = raw.into_chat_action().unwrap();
+        assert_eq!(
+            action,
+            ChatAction::SetEstimatedMinutes {
+                task_id: id,
+                minutes: 90,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_a_set_estimated_minutes_action_missing_a_value() {
+        let id = TaskId::new();
+        let err = chat_action("set_estimated_minutes", &id.0.to_string())
+            .into_chat_action()
+            .unwrap_err();
+        assert!(err.contains("missing estimated_minutes"));
+    }
+
+    #[test]
+    fn rejects_a_negative_estimated_minutes_value() {
+        let id = TaskId::new();
+        let mut raw = chat_action("set_estimated_minutes", &id.0.to_string());
+        raw.estimated_minutes = Some(-5);
+        let err = raw.into_chat_action().unwrap_err();
+        assert!(err.contains("negative"));
+    }
+
+    #[test]
+    fn parses_a_clear_estimated_minutes_action() {
+        let id = TaskId::new();
+        let action = chat_action("clear_estimated_minutes", &id.0.to_string())
+            .into_chat_action()
+            .unwrap();
+        assert_eq!(action, ChatAction::ClearEstimatedMinutes { task_id: id });
+    }
+
+    #[test]
+    fn parses_a_bulk_project_action_complete() {
+        let mut raw = project_chat_action("bulk_project_action");
+        raw.project = Some("Groceries".to_string());
+        raw.operation = Some("complete".to_string());
+        let action = raw.into_chat_action().unwrap();
+        assert_eq!(
+            action,
+            ChatAction::BulkProjectAction {
+                project: "Groceries".to_string(),
+                operation: BulkOperation::Complete,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_a_bulk_project_action_move_to_project() {
+        let mut raw = project_chat_action("bulk_project_action");
+        raw.project = Some("Groceries".to_string());
+        raw.operation = Some("move_to_project".to_string());
+        raw.target_project = Some("Errands".to_string());
+        let action = raw.into_chat_action().unwrap();
+        assert_eq!(
+            action,
+            ChatAction::BulkProjectAction {
+                project: "Groceries".to_string(),
+                operation: BulkOperation::MoveToProject("Errands".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_a_bulk_project_action_move_to_project_missing_a_target() {
+        let mut raw = project_chat_action("bulk_project_action");
+        raw.project = Some("Groceries".to_string());
+        raw.operation = Some("move_to_project".to_string());
+        let err = raw.into_chat_action().unwrap_err();
+        assert!(err.contains("missing a project"));
+    }
+
+    #[test]
+    fn parses_a_bulk_project_action_set_due_date() {
+        let mut raw = project_chat_action("bulk_project_action");
+        raw.project = Some("Taxes".to_string());
+        raw.operation = Some("set_due_date".to_string());
+        raw.due_date = Some("2026-08-28".to_string());
+        let action = raw.into_chat_action().unwrap();
+        assert_eq!(
+            action,
+            ChatAction::BulkProjectAction {
+                project: "Taxes".to_string(),
+                operation: BulkOperation::SetDueDate(NaiveDate::from_ymd_opt(2026, 8, 28).unwrap()),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_a_bulk_project_action_missing_an_operation() {
+        let mut raw = project_chat_action("bulk_project_action");
+        raw.project = Some("Groceries".to_string());
+        let err = raw.into_chat_action().unwrap_err();
+        assert!(err.contains("missing an operation"));
+    }
+
+    #[test]
+    fn rejects_a_bulk_project_action_with_an_unknown_operation() {
+        let mut raw = project_chat_action("bulk_project_action");
+        raw.project = Some("Groceries".to_string());
+        raw.operation = Some("archive".to_string());
+        let err = raw.into_chat_action().unwrap_err();
+        assert!(err.contains("unknown operation"));
+    }
+
+    #[test]
+    fn rejects_a_bulk_project_action_missing_a_project() {
+        let mut raw = project_chat_action("bulk_project_action");
+        raw.operation = Some("complete".to_string());
+        let err = raw.into_chat_action().unwrap_err();
         assert!(err.contains("missing a project"));
     }
 

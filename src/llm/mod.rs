@@ -147,6 +147,35 @@ pub enum ChatAction {
     DeleteTask {
         task_id: TaskId,
     },
+    SetEstimatedMinutes {
+        task_id: TaskId,
+        minutes: i64,
+    },
+    ClearEstimatedMinutes {
+        task_id: TaskId,
+    },
+    /// Same "the app resolves the set, not the model" reasoning as
+    /// `RescheduleOverdue`, generalized to "every open task in project X" —
+    /// a command like "mark everything in Groceries done" or "push all the
+    /// Taxes tasks to Friday" otherwise means the model has to enumerate one
+    /// action per task in the project, which risks missing some (and racing
+    /// the project's contents against whatever's in `ChatContext`).
+    BulkProjectAction {
+        project: String,
+        operation: BulkOperation,
+    },
+}
+
+/// The operation a [`ChatAction::BulkProjectAction`] applies to every open
+/// task in the named project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BulkOperation {
+    Complete,
+    Delete,
+    MoveToProject(String),
+    MoveToInbox,
+    SetDueDate(NaiveDate),
+    ClearDueDate,
 }
 
 #[derive(Debug, Clone)]

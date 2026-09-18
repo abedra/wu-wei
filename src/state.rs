@@ -14,8 +14,9 @@ use crate::domain::project::{Project, ProjectId, ProjectKind, ProjectStatus};
 use crate::domain::task::RecurrenceUnit;
 use crate::domain::task::{Recurrence, Task, TaskId};
 use crate::llm::{
-    self, ChatAction, ChatCalendarEventSummary, ChatCompletedTaskSummary, ChatContext, ChatReply,
-    ChatRole, ChatTaskSummary, ChatTurn, LlmConfig, ParsedTask, PromptContext, ProviderKind,
+    self, BulkOperation, ChatAction, ChatCalendarEventSummary, ChatCompletedTaskSummary,
+    ChatContext, ChatReply, ChatRole, ChatTaskSummary, ChatTurn, LlmConfig, ParsedTask,
+    PromptContext, ProviderKind,
 };
 use crate::schedule::{self, ScheduleRow};
 use crate::sync::{self, SyncSummary};
@@ -1811,7 +1812,66 @@ impl AppState {
                 let title = self.task_title(*task_id)?;
                 Ok(format!("permanently delete \"{title}\""))
             }
+            ChatAction::SetEstimatedMinutes { task_id, minutes } => {
+                let title = self.task_title(*task_id)?;
+                Ok(format!(
+                    "set the time estimate on \"{title}\" to {}",
+                    crate::ui::format_estimate(*minutes)
+                ))
+            }
+            ChatAction::ClearEstimatedMinutes { task_id } => {
+                let title = self.task_title(*task_id)?;
+                Ok(format!("clear the time estimate on \"{title}\""))
+            }
+            ChatAction::BulkProjectAction { project, operation } => {
+                let count = self.open_task_count_in_project(project)?;
+                if count == 0 {
+                    return Err(format!("there are no open tasks in \"{project}\""));
+                }
+                let noun = if count == 1 { "task" } else { "tasks" };
+                match operation {
+                    BulkOperation::Complete => {
+                        Ok(format!("complete {count} {noun} in \"{project}\""))
+                    }
+                    BulkOperation::Delete => Ok(format!(
+                        "permanently delete {count} {noun} in \"{project}\""
+                    )),
+                    BulkOperation::MoveToProject(target) => {
+                        if !project_exists(target) {
+                            return Err(format!("no project named {target:?}"));
+                        }
+                        Ok(format!(
+                            "move {count} {noun} from \"{project}\" to {target}"
+                        ))
+                    }
+                    BulkOperation::MoveToInbox => {
+                        Ok(format!("move {count} {noun} from \"{project}\" to Inbox"))
+                    }
+                    BulkOperation::SetDueDate(due_date) => Ok(format!(
+                        "set the due date on {count} {noun} in \"{project}\" to {due_date}"
+                    )),
+                    BulkOperation::ClearDueDate => Ok(format!(
+                        "clear the due date on {count} {noun} in \"{project}\""
+                    )),
+                }
+            }
         }
+    }
+
+    /// Number of currently open tasks in the project named `project` — the
+    /// working set a [`ChatAction::BulkProjectAction`] operates on. Errors
+    /// if no project with that name exists, mirroring `task_title`'s
+    /// "reference something real" check for a single task.
+    fn open_task_count_in_project(&self, project: &str) -> Result<usize, String> {
+        let project_id = self
+            .projects
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(project))
+            .map(|p| p.id)
+            .ok_or_else(|| format!("no project named {project:?}"))?;
+        task_repo::list_by_project(&self.conn, project_id)
+            .map(|tasks| tasks.len())
+            .map_err(|e| e.to_string())
     }
 
     /// Task deletion is deliberately excluded (see `ChatAction`'s doc
@@ -1967,7 +2027,116 @@ impl AppState {
                 self.delete_task_checked(task_id)?;
                 Ok(format!("deleted \"{title}\""))
             }
+            ChatAction::SetEstimatedMinutes { task_id, minutes } => {
+                let title = self.task_title(task_id)?;
+                self.write_task_estimate(task_id, Some(minutes))?;
+                Ok(format!(
+                    "set the time estimate on \"{title}\" to {}",
+                    crate::ui::format_estimate(minutes)
+                ))
+            }
+            ChatAction::ClearEstimatedMinutes { task_id } => {
+                let title = self.task_title(task_id)?;
+                self.write_task_estimate(task_id, None)?;
+                Ok(format!("cleared the time estimate on \"{title}\""))
+            }
+            ChatAction::BulkProjectAction { project, operation } => {
+                let project_id = self
+                    .projects
+                    .iter()
+                    .find(|p| p.name.eq_ignore_ascii_case(&project))
+                    .map(|p| p.id)
+                    .ok_or_else(|| format!("no project named {project:?}"))?;
+                let tasks = task_repo::list_by_project(&self.conn, project_id)
+                    .map_err(|e| e.to_string())?;
+                if tasks.is_empty() {
+                    return Err(format!("there are no open tasks in \"{project}\""));
+                }
+                let count = tasks.len();
+                let noun = if count == 1 { "task" } else { "tasks" };
+                match operation {
+                    BulkOperation::Complete => {
+                        for task in &tasks {
+                            task_repo::set_completed(&self.conn, task.id, true)
+                                .map_err(|e| e.to_string())?;
+                            self.spawn_next_occurrence(task.id);
+                        }
+                        Ok(format!("completed {count} {noun} in \"{project}\""))
+                    }
+                    BulkOperation::Delete => {
+                        for task in &tasks {
+                            task_repo::delete(&self.conn, task.id).map_err(|e| e.to_string())?;
+                            if self.selection == Selection::Task(task.id) {
+                                self.clear_selection();
+                            }
+                        }
+                        Ok(format!(
+                            "permanently deleted {count} {noun} in \"{project}\""
+                        ))
+                    }
+                    BulkOperation::MoveToProject(target) => {
+                        let target_id = self
+                            .projects
+                            .iter()
+                            .find(|p| p.name.eq_ignore_ascii_case(&target))
+                            .map(|p| p.id)
+                            .ok_or_else(|| format!("no project named {target:?}"))?;
+                        for task in &tasks {
+                            task_repo::set_project(&self.conn, task.id, Some(target_id))
+                                .map_err(|e| e.to_string())?;
+                        }
+                        Ok(format!(
+                            "moved {count} {noun} from \"{project}\" to {target}"
+                        ))
+                    }
+                    BulkOperation::MoveToInbox => {
+                        for task in &tasks {
+                            task_repo::set_project(&self.conn, task.id, None)
+                                .map_err(|e| e.to_string())?;
+                        }
+                        Ok(format!("moved {count} {noun} from \"{project}\" to Inbox"))
+                    }
+                    BulkOperation::SetDueDate(due_date) => {
+                        for task in &tasks {
+                            task_repo::set_due_date(&self.conn, task.id, Some(due_date))
+                                .map_err(|e| e.to_string())?;
+                        }
+                        Ok(format!(
+                            "set the due date on {count} {noun} in \"{project}\" to {due_date}"
+                        ))
+                    }
+                    BulkOperation::ClearDueDate => {
+                        for task in &tasks {
+                            task_repo::set_due_date(&self.conn, task.id, None)
+                                .map_err(|e| e.to_string())?;
+                        }
+                        Ok(format!(
+                            "cleared the due date on {count} {noun} in \"{project}\""
+                        ))
+                    }
+                }
+            }
         }
+    }
+
+    /// Writes `estimated_minutes` (`None` clears it) onto `task_id` directly
+    /// via the repo, keeping the detail editor's buffer in sync if that task
+    /// happens to be open there. Unlike `set_task_estimate` (the estimate
+    /// picker's own tail), this doesn't depend on the task being in
+    /// `visible_tasks` — the AI chat panel can reference any open task,
+    /// not just ones in the currently-selected perspective.
+    fn write_task_estimate(&mut self, task_id: TaskId, minutes: Option<i64>) -> Result<(), String> {
+        let mut task = task_repo::get(&self.conn, task_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no task with that id".to_string())?;
+        task.estimated_minutes = minutes;
+        task_repo::update(&self.conn, &task).map_err(|e| e.to_string())?;
+        if let Some(buf) = &mut self.task_edit_buffer
+            && buf.id == task_id
+        {
+            buf.estimated_minutes = minutes;
+        }
+        Ok(())
     }
 
     pub fn select_task(&mut self, id: TaskId) {
@@ -3231,6 +3400,172 @@ mod tests {
                 .content
                 .contains("no overdue tasks to reschedule")
         );
+    }
+
+    #[test]
+    fn chat_action_set_estimated_minutes_sets_the_estimate() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        let task = Task::new_inbox("write report");
+        task_repo::create(&state.conn, &task).unwrap();
+
+        state.receive_chat_reply(ChatReply {
+            reply: "I'll set the estimate.".to_string(),
+            actions: vec![ChatAction::SetEstimatedMinutes {
+                task_id: task.id,
+                minutes: 90,
+            }],
+            parse_failures: Vec::new(),
+        });
+        state.confirm_pending_chat_actions();
+
+        let updated = task_repo::get(&state.conn, task.id).unwrap().unwrap();
+        assert_eq!(updated.estimated_minutes, Some(90));
+        assert!(
+            state
+                .chat_history
+                .last()
+                .unwrap()
+                .content
+                .contains("1h 30m")
+        );
+    }
+
+    #[test]
+    fn chat_action_clear_estimated_minutes_clears_the_estimate() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        let mut task = Task::new_inbox("write report");
+        task.estimated_minutes = Some(45);
+        task_repo::create(&state.conn, &task).unwrap();
+
+        state.receive_chat_reply(ChatReply {
+            reply: "I'll clear the estimate.".to_string(),
+            actions: vec![ChatAction::ClearEstimatedMinutes { task_id: task.id }],
+            parse_failures: Vec::new(),
+        });
+        state.confirm_pending_chat_actions();
+
+        let updated = task_repo::get(&state.conn, task.id).unwrap().unwrap();
+        assert_eq!(updated.estimated_minutes, None);
+    }
+
+    #[test]
+    fn chat_action_bulk_project_action_completes_every_open_task_in_the_project() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.new_project_name = "Groceries".to_string();
+        state.create_project();
+        let project_id = state.projects[0].id;
+        state.set_perspective(Perspective::Project(project_id));
+        for title in ["milk", "eggs"] {
+            state.quick_entry_buffer = title.to_string();
+            state.quick_capture_submit();
+        }
+
+        state.receive_chat_reply(ChatReply {
+            reply: "I'll mark everything in Groceries done.".to_string(),
+            actions: vec![ChatAction::BulkProjectAction {
+                project: "Groceries".to_string(),
+                operation: BulkOperation::Complete,
+            }],
+            parse_failures: Vec::new(),
+        });
+        assert!(
+            state.chat_history[0]
+                .content
+                .contains("complete 2 tasks in \"Groceries\"")
+        );
+        state.confirm_pending_chat_actions();
+
+        assert!(
+            task_repo::list_by_project(&state.conn, project_id)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(task_repo::list_completed(&state.conn).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn chat_action_bulk_project_action_with_no_open_tasks_is_reported_as_a_failure() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.new_project_name = "Groceries".to_string();
+        state.create_project();
+
+        state.receive_chat_reply(ChatReply {
+            reply: "I'll mark everything in Groceries done.".to_string(),
+            actions: vec![ChatAction::BulkProjectAction {
+                project: "Groceries".to_string(),
+                operation: BulkOperation::Complete,
+            }],
+            parse_failures: Vec::new(),
+        });
+
+        assert!(state.pending_chat_actions.is_empty());
+        assert!(
+            state.chat_history[0]
+                .content
+                .contains("no open tasks in \"Groceries\"")
+        );
+    }
+
+    #[test]
+    fn chat_action_bulk_project_action_move_to_project_moves_every_task() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        state.new_project_name = "Groceries".to_string();
+        state.create_project();
+        let groceries_id = state.projects[0].id;
+        state.new_project_name = "Errands".to_string();
+        state.create_project();
+        let errands_id = state
+            .projects
+            .iter()
+            .find(|p| p.name == "Errands")
+            .unwrap()
+            .id;
+
+        state.set_perspective(Perspective::Project(groceries_id));
+        state.quick_entry_buffer = "milk".to_string();
+        state.quick_capture_submit();
+
+        state.receive_chat_reply(ChatReply {
+            reply: "I'll move it.".to_string(),
+            actions: vec![ChatAction::BulkProjectAction {
+                project: "Groceries".to_string(),
+                operation: BulkOperation::MoveToProject("Errands".to_string()),
+            }],
+            parse_failures: Vec::new(),
+        });
+        state.confirm_pending_chat_actions();
+
+        let moved = task_repo::list_by_project(&state.conn, errands_id).unwrap();
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].title, "milk");
+    }
+
+    #[test]
+    fn chat_action_bulk_project_action_set_due_date_sets_every_tasks_due_date() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        let today = Local::now().date_naive();
+        state.new_project_name = "Taxes".to_string();
+        state.create_project();
+        let project_id = state.projects[0].id;
+        state.set_perspective(Perspective::Project(project_id));
+        for title in ["gather receipts", "file return"] {
+            state.quick_entry_buffer = title.to_string();
+            state.quick_capture_submit();
+        }
+
+        state.receive_chat_reply(ChatReply {
+            reply: "I'll push those out.".to_string(),
+            actions: vec![ChatAction::BulkProjectAction {
+                project: "Taxes".to_string(),
+                operation: BulkOperation::SetDueDate(today),
+            }],
+            parse_failures: Vec::new(),
+        });
+        state.confirm_pending_chat_actions();
+
+        for task in task_repo::list_by_project(&state.conn, project_id).unwrap() {
+            assert_eq!(task.due_date, Some(today));
+        }
     }
 
     #[test]
