@@ -34,6 +34,15 @@ pub fn record_tombstone(
     Ok(())
 }
 
+pub fn is_tombstoned(conn: &Connection, kind: &str, id: &str) -> DbResult<bool> {
+    let exists = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_tombstones WHERE kind = ?1 AND id = ?2)",
+        params![kind, id],
+        |row| row.get(0),
+    )?;
+    Ok(exists)
+}
+
 pub fn list_tombstones(conn: &Connection) -> DbResult<Vec<Tombstone>> {
     let mut stmt = conn.prepare("SELECT kind, id, deleted_at FROM sync_tombstones")?;
     let tombstones = stmt

@@ -21,6 +21,16 @@ impl TaskId {
     pub fn new() -> Self {
         TaskId(Uuid::new_v4())
     }
+
+    /// The id of the occurrence a recurring task spawns when completed —
+    /// derived from this (the completed task's) id rather than random, so
+    /// every device that completes the same task spawns the *same* next
+    /// task, which sync then merges as one instead of unioning into
+    /// duplicates. Also means a task can only ever have one successor, so
+    /// completing, reopening and re-completing it doesn't spawn a second.
+    pub fn next_occurrence(self) -> TaskId {
+        TaskId(Uuid::new_v5(&self.0, b"next-occurrence"))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::calendar::{self, CalendarEvent, GoogleCalendarConfig, GoogleTokenSet};
 use crate::db;
 use crate::db::error::DbResult;
-use crate::db::{project_repo, settings_repo, task_repo};
+use crate::db::{project_repo, settings_repo, sync_repo, task_repo};
 use crate::db_bootstrap;
 use crate::domain::project::{Project, ProjectId, ProjectKind, ProjectStatus};
 #[cfg(test)]
@@ -406,6 +406,13 @@ fn dedup_keep_order(items: Vec<String>) -> Vec<String> {
         .into_iter()
         .filter(|item| seen.insert(item.clone()))
         .collect()
+}
+
+/// Whether `next_id` — a recurring task's deterministic successor id, see
+/// `TaskId::next_occurrence` — already exists here or was deleted.
+fn occurrence_already_spawned(conn: &Connection, next_id: TaskId) -> DbResult<bool> {
+    Ok(task_repo::get(conn, next_id)?.is_some()
+        || sync_repo::is_tombstoned(conn, "task", &next_id.0.to_string())?)
 }
 
 impl SettingsDraft {
@@ -2950,7 +2957,22 @@ impl AppState {
     /// `recurrence.next_due_date` measured from today (the completion date —
     /// "repeat after completion" semantics). The completed task itself is
     /// left as-is, so it stays visible in Completed history.
+    ///
+    /// The new task's id is `completed_id.next_occurrence()` (see its doc
+    /// comment), so this is a no-op if that successor already exists — or
+    /// was deleted, since a tombstone would just delete it again on the next
+    /// sync anyway.
     fn spawn_next_occurrence(&mut self, completed_id: TaskId) {
+        let next_id = completed_id.next_occurrence();
+        match occurrence_already_spawned(&self.conn, next_id) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => {
+                self.error_message = Some(e.to_string());
+                return;
+            }
+        }
+
         let task = match task_repo::get(&self.conn, completed_id) {
             Ok(Some(t)) => t,
             Ok(None) => return,
@@ -2968,6 +2990,7 @@ impl AppState {
             .unwrap_or_else(|| Local::now().date_naive());
 
         let mut next = Task::new_inbox(task.title);
+        next.id = next_id;
         next.notes = task.notes;
         next.project_id = task.project_id;
         next.due_date = Some(recurrence.next_due_date(completed_on));
@@ -4850,6 +4873,77 @@ mod tests {
         );
         let expected_due = original.completed_at.unwrap().date_naive() + chrono::Duration::days(3);
         assert_eq!(next.due_date, Some(expected_due));
+    }
+
+    /// A quick-captured task set to repeat daily, saved through the normal
+    /// edit path — shared setup for the recurring-task tests below.
+    fn recurring_task(state: &mut AppState, title: &str) -> TaskId {
+        use crate::domain::task::RecurrenceUnit;
+
+        state.quick_entry_buffer = title.to_string();
+        state.quick_capture_submit();
+        let task_id = state.visible_tasks[0].id;
+        state.select_task(task_id);
+        state.task_edit_buffer.as_mut().unwrap().recurrence =
+            Some(Recurrence::every(1, RecurrenceUnit::Days));
+        state.save_task_edits();
+        task_id
+    }
+
+    #[test]
+    fn re_completing_a_recurring_task_does_not_spawn_a_second_occurrence() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        let task_id = recurring_task(&mut state, "stretch");
+
+        state.toggle_complete(task_id, true);
+        state.toggle_complete(task_id, false);
+        state.toggle_complete(task_id, true);
+
+        let all = task_repo::list_all(&state.conn).unwrap();
+        assert_eq!(all.len(), 2, "expected the original plus one successor");
+    }
+
+    #[test]
+    fn a_deleted_next_occurrence_is_not_respawned() {
+        let mut state = AppState::new(crate::db::open_in_memory().unwrap());
+        let task_id = recurring_task(&mut state, "stretch");
+
+        state.toggle_complete(task_id, true);
+        state.delete_task(task_id.next_occurrence());
+        state.toggle_complete(task_id, false);
+        state.toggle_complete(task_id, true);
+
+        let all = task_repo::list_all(&state.conn).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, task_id);
+    }
+
+    #[test]
+    fn two_devices_completing_the_same_recurring_task_sync_to_one_occurrence() {
+        // The duplicate-recurring-tasks bug: each device that completed the
+        // same task before syncing spawned its own randomly-id'd successor,
+        // and sync (matching by id) kept them all.
+        let mut device_a = AppState::new(crate::db::open_in_memory().unwrap());
+        let task_id = recurring_task(&mut device_a, "inbox zero");
+        let shared = task_repo::get(&device_a.conn, task_id).unwrap().unwrap();
+
+        let mut device_b = AppState::new(crate::db::open_in_memory().unwrap());
+        task_repo::upsert_synced(&device_b.conn, &shared).unwrap();
+
+        device_a.toggle_complete(task_id, true);
+        device_b.toggle_complete(task_id, true);
+
+        let local = sync::local_snapshot(&device_a.conn, "device-a").unwrap();
+        let remote = sync::local_snapshot(&device_b.conn, "device-b").unwrap();
+        sync::merge(&device_a.conn, &local, std::slice::from_ref(&remote)).unwrap();
+
+        let open: Vec<_> = task_repo::list_all(&device_a.conn)
+            .unwrap()
+            .into_iter()
+            .filter(|t| !t.completed)
+            .collect();
+        assert_eq!(open.len(), 1, "duplicate next occurrences after sync");
+        assert_eq!(open[0].id, task_id.next_occurrence());
     }
 
     #[test]
